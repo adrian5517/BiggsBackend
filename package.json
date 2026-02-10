@@ -1,0 +1,29 @@
+{
+  "name": "biggsprojects",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@dotenvx/dotenvx-ops": "^0.30.3",
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.9.0",
+    "cors": "^2.8.6",
+    "cronjob": "^0.1.0",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.2.0",
+    "multer": "^2.0.2",
+    "node-cron": "^4.2.1",
+    "nodemon": "^3.1.11",
+    "streamifier": "^0.1.1"
+  }
+}
