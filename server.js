@@ -19,10 +19,25 @@ const corsOptions = {
   origin: function(origin, callback) {
     // allow requests with no origin (like mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
+
+    // During local development allow any localhost/127.0.0.1 origin regardless of port
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        const parsed = new URL(origin);
+        const host = parsed.hostname;
+        if (host === 'localhost' || host === '127.0.0.1') {
+          // allow
+          console.log('CORS: allowing local dev origin', origin);
+          return callback(null, true);
+        }
+      } catch (e) {
+        // fall through to deny
+      }
+    }
+
     return callback(new Error('CORS policy: This origin is not allowed: ' + origin));
   },
   credentials: true,
