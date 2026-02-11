@@ -69,7 +69,7 @@ const registerUser = async (req, res) => {
         await newUser.save();
 
         // Use the access token generator defined on the model (with fallback secret)
-        const token = newUser.generateAccessToken ? newUser.generateAccessToken() : jwt.sign({ id: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '15m' });
+        const token = newUser.generateAccessToken ? newUser.generateAccessToken() : jwt.sign({ id: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '7d' });
 
         // Don't send password in response
         const userResponse = {
@@ -122,7 +122,7 @@ const loginUser = async (req, res) => {
         }
 
         // Prefer model method if present; fall back to signing directly
-        const token = user.generateAccessToken ? user.generateAccessToken() : jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '15m' });
+        const token = user.generateAccessToken ? user.generateAccessToken() : jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
 
         // Create a refresh token (rotatable) and store it on the user
         const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'dev_refresh_secret';
@@ -139,29 +139,18 @@ const loginUser = async (req, res) => {
 
         // Set HttpOnly refresh token cookie (accessible only to server)
         try {
-            const cookieOpts = { httpOnly: true, sameSite: 'none' };
-            if (process.env.NODE_ENV === 'production') {
-                cookieOpts.secure = true;
-                cookieOpts.domain = process.env.COOKIE_DOMAIN || undefined;
-            }
+            const isProd = process.env.NODE_ENV === 'production';
+            const forceSecure = isProd || String(process.env.FORCE_SECURE_COOKIES || '').toLowerCase() === 'true';
+            // In local/dev environments we avoid SameSite=None without Secure because modern
+            // browsers will ignore such cookies. Use 'lax' for dev and 'none' (with secure)
+            // for production/cross-site scenarios.
+            const cookieOpts = { httpOnly: true, sameSite: forceSecure ? 'none' : 'lax', secure: !!forceSecure };
+            if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
+            // maxAge set to 7 days
             res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
         } catch (e) {
             console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
         }
-            try {
-                const cookieOpts = { httpOnly: true, sameSite: 'none' };
-                // For cross-site cookies, SameSite=None requires Secure attribute.
-                // Ensure Secure is set when SameSite is 'none'. In production this will
-                // also restrict cookies to HTTPS. If you need to test on localhost over
-                // HTTP, consider using a local HTTPS dev server or an env flag.
-                if (String(cookieOpts.sameSite).toLowerCase() === 'none') {
-                    cookieOpts.secure = true;
-                }
-                if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
-                res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
-            } catch (e) {
-                console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
-            }
 
         // Don't send password in response
         const userResponse = {
@@ -264,7 +253,7 @@ const refreshAccessToken = async (req, res) => {
         }
 
         // Issue new access token (and rotate refresh token)
-        const newAccessToken = jwt.sign({ id: user._1?._id || user._id }, JWT_SECRET, { expiresIn: process.env.ACCESS_EXPIRES_IN || '1h' });
+        const newAccessToken = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: process.env.ACCESS_EXPIRES_IN || '1h' });
 
         // Rotate refresh token: remove old, add new
         const newRefreshToken = jwt.sign({ id: user._id }, refreshSecret, { expiresIn: process.env.REFRESH_EXPIRES_IN || '7d' });
@@ -274,16 +263,14 @@ const refreshAccessToken = async (req, res) => {
 
         // Set cookie
                 try {
-                    // SameSite=None so refresh cookie is sent across origins during local development.
-                    const cookieOpts = { httpOnly: true, sameSite: 'none' };
-                    if (process.env.NODE_ENV === 'production') {
-                        cookieOpts.secure = true;
-                        cookieOpts.domain = process.env.COOKIE_DOMAIN || undefined;
-                    }
+                    const isProd = process.env.NODE_ENV === 'production';
+                    const forceSecure = isProd || String(process.env.FORCE_SECURE_COOKIES || '').toLowerCase() === 'true';
+                    const cookieOpts = { httpOnly: true, sameSite: forceSecure ? 'none' : 'lax', secure: !!forceSecure };
+                    if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
                     res.cookie('refreshToken', newRefreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
                 } catch (e) {
-          console.warn('Failed to set new refresh token cookie:', e && e.message ? e.message : e);
-        }
+                    console.warn('Failed to set new refresh token cookie:', e && e.message ? e.message : e);
+                }
 
         return res.status(200).json({ success: true, token: newAccessToken, user: { _id: user._id, username: user.username, email: user.email, role: user.role } });
     } catch (error) {

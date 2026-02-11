@@ -9,6 +9,10 @@ const cron = require('node-cron');
 const authRoutes = require('./routes/authRoutes');
 const fetchRoutes = require('./routes/fetchRoutes');
 const reportRoutes = require('./routes/reportRoutes');
+const debugRoutes = require('./routes/debugRoutes');
+const masterRoutes = require('./routes/masterRoutes');
+let exportQueueService = null
+try { exportQueueService = require('./services/exportQueue') } catch (e) { console.warn('exportQueue service not available', e.message) }
 
 // Middleware to parse JSON requests
     // Middleware
@@ -82,6 +86,16 @@ cron.schedule('*/15 * * * *', () => {
 app.use('/api/auth', authRoutes);
 app.use('/api/fetch', fetchRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/debug', debugRoutes);
+app.use('/api/master', masterRoutes);
+
+// Start the export worker in background (non-blocking)
+if (exportQueueService && exportQueueService.startWorker) {
+  try { exportQueueService.startWorker().catch(e => console.error('exportQueue start failed', e)) } catch (e) { console.error('exportQueue start error', e) }
+} else {
+  console.log('exportQueue not configured; falling back to legacy worker if present')
+  try { const exportWorker = require('./services/exportWorker'); exportWorker.start().catch(()=>{}) } catch (e) {}
+}
 
 
 

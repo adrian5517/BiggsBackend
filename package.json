@@ -15,17 +15,19 @@
     "@dotenvx/dotenvx-ops": "^0.30.3",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.67.3",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.6",
     "cronjob": "^0.1.0",
+    "csv-parse": "^5.6.0",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.0",
     "multer": "^2.0.2",
-    "csv-parse": "^5.6.0",
     "node-cron": "^4.2.1",
     "nodemon": "^3.1.11",
+    "redis": "^5.10.0",
     "streamifier": "^0.1.1"
   }
 }

@@ -20,6 +20,8 @@ function normalizeValue(value) {
   }
 }
 
+
+
 function normalizeRow(row) {
   const normalized = {};
   for (const [key, value] of Object.entries(row)) {
