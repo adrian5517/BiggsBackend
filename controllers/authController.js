@@ -281,6 +281,23 @@ const uploadProfilePicture = async (req, res) => {
                 console.error('Cloudinary upload failed:', err);
                 return res.status(500).json({ success: false, message: 'Image upload failed', error: String(err.message || err) });
             }
+
+            function parseCookies(req) {
+                const header = req.headers && req.headers.cookie;
+                if (!header) return {};
+                return header.split(';').reduce((acc, part) => {
+                    const [key, ...rest] = part.trim().split('=');
+                    if (!key) return acc;
+                    acc[key] = decodeURIComponent(rest.join('='));
+                    return acc;
+                }, {});
+            }
+
+            function readCookie(req, name) {
+                if (!req || !name) return null;
+                const cookies = parseCookies(req);
+                return cookies[name] || null;
+            }
         }
 
         if (!imageUrl) {

@@ -2,11 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 const mongoose = require('mongoose');
 const MONGO_URI = process.env.MONGO_URI;
 const cron = require('node-cron');
 const authRoutes = require('./routes/authRoutes');
+const fetchRoutes = require('./routes/fetchRoutes');
+const reportRoutes = require('./routes/reportRoutes');
 
 // Middleware to parse JSON requests
     // Middleware
@@ -74,6 +76,8 @@ cron.schedule('*/15 * * * *', () => {
 
 //Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/fetch', fetchRoutes);
+app.use('/api/reports', reportRoutes);
 
 
 
