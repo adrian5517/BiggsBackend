@@ -1,5 +1,20 @@
-require('dotenv').config()
+const path = require('path')
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') })
+const fs = require('fs')
+function ensureEnvVar(key) {
+  if (!process.env[key]) {
+    try {
+      const txt = fs.readFileSync(path.resolve(__dirname, '..', '.env'), 'utf8')
+      const re = new RegExp('^' + key + '\\s*=\\s*(.*)$', 'm')
+      const m = txt.match(re)
+      if (m) process.env[key] = m[1].trim()
+    } catch (e) {}
+  }
+}
+ensureEnvVar('REDIS_URL')
 const exportQueue = require('./exportQueue')
+
+console.log('DEBUG: REDIS_URL=', process.env.REDIS_URL)
 
 async function run() {
   if (!process.env.REDIS_URL && !process.env.REDIS) {

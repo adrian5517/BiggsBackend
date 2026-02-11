@@ -1,23 +1,24 @@
-const express = require('express');
-const router = express.Router();
-const upload = require('../middleware/uploadMiddleware');
+const express = require('express')
+const multer = require('multer')
+const path = require('path')
+const router = express.Router()
+const { handleUpload } = require('../controllers/uploadController')
 
-// Simple upload endpoint used by server mounting at /api/upload and /upload
-router.post('/', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
-
-    // For now, return basic metadata. Cloudinary upload is handled elsewhere.
-    return res.status(200).json({
-      success: true,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size
-    });
-  } catch (err) {
-    console.error('Upload route error:', err);
-    return res.status(500).json({ success: false, message: 'Upload failed', error: err.message });
+// multer storage into ./latest (existing folder used by worker)
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.resolve(process.cwd(), 'latest'))
+  },
+  filename: function (req, file, cb) {
+    // keep original filename
+    cb(null, file.originalname)
   }
-});
+})
 
-module.exports = router;
+const upload = multer({ storage })
+
+// Accept multiple files (frontend should upload the 7 CSVs)
+router.post('/', upload.any(), handleUpload)
+
+module.exports = router
+

@@ -22,6 +22,7 @@ function connectedToMongo() {
 async function ensureMongo() {
   if (connectedToMongo()) return
   const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/biggs'
+  console.log('[exportQueue] Resolved MONGO_URI =', uri)
   await mongoose.connect(uri)
 }
 
@@ -39,7 +40,8 @@ async function enqueueExportJob(params = {}, userId = null) {
   const jobDoc = new ExportJob({ jobId, userId, params, status: 'pending' })
   await jobDoc.save()
   const q = createQueue()
-  await q.add('export', { exportJobId: jobDoc._id.toString() }, { attempts: 3, backoff: { type: 'exponential', delay: 1000 } })
+  const job = await q.add('export', { exportJobId: jobDoc._id.toString() }, { attempts: 3, backoff: { type: 'exponential', delay: 1000 } })
+  console.log('[exportQueue] enqueued export job', job.id, 'docId=', jobDoc._id.toString())
   return jobDoc
 }
 
@@ -60,6 +62,7 @@ async function startWorker(opts = {}) {
     if (!jobDoc) throw new Error('ExportJob doc not found')
 
     try {
+      console.log('[exportQueue] processing job', job.id, 'exportJobId=', exportJobId)
       jobDoc.status = 'running'
       await jobDoc.save()
       const filename = `${jobDoc.jobId}.csv.gz`
@@ -88,12 +91,15 @@ async function startWorker(opts = {}) {
   }, { connection: { url: REDIS_URL }, concurrency })
 
   worker.on('failed', (job, err) => {
-    console.error('[exportQueue] job failed', job.id, err.message)
+    console.error('[exportQueue] job failed', job.id, err && err.message ? err.message : err)
   })
 
   worker.on('completed', (job) => {
     console.log('[exportQueue] job completed', job.id)
   })
+  worker.on('progress', (job, progress) => console.log('[exportQueue] job progress', job.id, progress))
+  worker.on('stalled', (jobId) => console.warn('[exportQueue] job stalled', jobId))
+  worker.on('error', (err) => console.error('[exportQueue] worker error', err && err.message ? err.message : err))
   console.log('[exportQueue] worker started, concurrency=', concurrency)
 }
 

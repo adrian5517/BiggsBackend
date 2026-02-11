@@ -10,6 +10,7 @@ const INDEX_PATH = path.join(MASTER_DIR, 'index.json')
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/biggs'
 
 async function connect() {
+  console.log('Resolved MONGO_URI =', MONGO_URI)
   await mongoose.connect(MONGO_URI)
   console.log('Connected to MongoDB')
 }

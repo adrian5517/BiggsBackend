@@ -11,8 +11,13 @@ const fetchRoutes = require('./routes/fetchRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const debugRoutes = require('./routes/debugRoutes');
 const masterRoutes = require('./routes/masterRoutes');
+const statusRoute = require('./routes/status');
+const healthRoute = require('./routes/health');
+const queueEventsRoute = require('./routes/queueEvents');
 let exportQueueService = null
 try { exportQueueService = require('./services/exportQueue') } catch (e) { console.warn('exportQueue service not available', e.message) }
+let importQueueService = null
+try { importQueueService = require('./services/importQueue') } catch (e) { console.warn('importQueue service not available', e.message) }
 
 // Middleware to parse JSON requests
     // Middleware
@@ -88,6 +93,9 @@ app.use('/api/fetch', fetchRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/debug', debugRoutes);
 app.use('/api/master', masterRoutes);
+app.use('/api/status', statusRoute);
+app.use('/api/health', healthRoute);
+app.use('/api/queue/events', queueEventsRoute);
 
 // Start the export worker in background (non-blocking)
 if (exportQueueService && exportQueueService.startWorker) {
@@ -97,11 +105,20 @@ if (exportQueueService && exportQueueService.startWorker) {
   try { const exportWorker = require('./services/exportWorker'); exportWorker.start().catch(()=>{}) } catch (e) {}
 }
 
+// Start import queue worker if available
+if (importQueueService && importQueueService.startWorker) {
+  try { importQueueService.startWorker().catch(e => console.error('importQueue start failed', e)) } catch (e) { console.error('importQueue start error', e) }
+} else {
+  console.log('importQueue not configured; import jobs will not be processed by queue')
+}
 
 
 
 
 
+
+console.log('Resolved MONGO_URI =', MONGO_URI || '<missing>')
+console.log(`Starting server on port ${port}...`)
 mongoose.connect(MONGO_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('Could not connect to MongoDB', err));

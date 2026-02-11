@@ -1,3 +1,5 @@
+const path = require('path')
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') })
 const masterCtrl = require('../controllers/masterController')
 
 async function run() {

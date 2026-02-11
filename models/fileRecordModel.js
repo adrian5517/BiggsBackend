@@ -1,9 +1,9 @@
-const mongoose = require('mongoose');
+const mongoose = require('mongoose')
 
 const FileRecordSchema = new mongoose.Schema({
   filename: { type: String, required: true },
   branch: { type: String },
-  pos: { type: Number },
+  pos: { type: String },
   workDate: { type: Date },
   fileType: { type: String },
   storage: {
@@ -12,8 +12,8 @@ const FileRecordSchema = new mongoose.Schema({
   },
   fetchedAt: { type: Date, default: Date.now },
   size: { type: Number },
-  status: { type: String, enum: ['raw', 'parsed', 'error'], default: 'raw' },
+  status: { type: String, enum: ['raw', 'uploaded', 'parsed', 'error'], default: 'raw' },
   error: { type: String },
 }, { timestamps: true });
 
-module.exports = mongoose.model('FileRecord', FileRecordSchema);
+module.exports = mongoose.model('FileRecord', FileRecordSchema)

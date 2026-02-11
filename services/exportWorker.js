@@ -14,6 +14,7 @@ let polling = false
 async function connectIfNeeded() {
   if (mongoose.connection.readyState === 1) return
   const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/biggs'
+  console.log('[exportWorker] Resolved MONGO_URI =', uri)
   await mongoose.connect(uri)
 }
 
@@ -54,7 +55,7 @@ async function pollLoop() {
   try {
     await connectIfNeeded()
     // pick one pending job
-    const job = await ExportJob.findOneAndUpdate({ status: 'pending' }, { $set: { status: 'running' } }, { new: true })
+    const job = await ExportJob.findOneAndUpdate({ status: 'pending' }, { $set: { status: 'running' } }, { returnDocument: 'after' })
     if (!job) return
     // we set running above to claim it, but processJob will set again and save
     await processJob(job)

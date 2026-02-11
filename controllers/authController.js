@@ -338,7 +338,7 @@ const uploadProfilePicture = async (req, res) => {
         const user = await User.findByIdAndUpdate(
             userId,
             { profilePicture: imageUrl },
-            { new: true }
+            { returnDocument: 'after' }
         ).select('-password');
 
         if (!user) {
