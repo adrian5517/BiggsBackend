@@ -3,9 +3,13 @@ node_modules/
 documents/
 scripts/
 <<<<<<< HEAD
+<<<<<<< HEAD
 latest/
 master/
 DESIGN.md
+=======
+latest/
+>>>>>>> 6337fd4 (Working Fetched Data)
 =======
 latest/
 >>>>>>> 6337fd4 (Working Fetched Data)
