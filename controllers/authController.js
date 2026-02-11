@@ -151,6 +151,20 @@ const loginUser = async (req, res) => {
         } catch (e) {
             console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
         }
+            try {
+                const cookieOpts = { httpOnly: true, sameSite: 'none' };
+                // For cross-site cookies, SameSite=None requires Secure attribute.
+                // Ensure Secure is set when SameSite is 'none'. In production this will
+                // also restrict cookies to HTTPS. If you need to test on localhost over
+                // HTTP, consider using a local HTTPS dev server or an env flag.
+                if (String(cookieOpts.sameSite).toLowerCase() === 'none') {
+                    cookieOpts.secure = true;
+                }
+                if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
+                res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
+            } catch (e) {
+                console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
+            }
 
         // Don't send password in response
         const userResponse = {
