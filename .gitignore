@@ -1,3 +1,7 @@
 node_modules/
 .env
 documents/
+scripts/
+latest/
+master/
+DESIGN.md
