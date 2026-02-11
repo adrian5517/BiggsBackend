@@ -20,8 +20,12 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
 const corsOptions = {
   origin: function(origin, callback) {
     // allow requests with no origin (like mobile apps, curl, server-to-server)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log('[CORS] no origin (server-to-server or file://). Allowing');
+      return callback(null, true);
+    }
     if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log('[CORS] allowing origin', origin);
       return callback(null, true);
     }
 
@@ -31,8 +35,7 @@ const corsOptions = {
         const parsed = new URL(origin);
         const host = parsed.hostname;
         if (host === 'localhost' || host === '127.0.0.1') {
-          // allow
-          console.log('CORS: allowing local dev origin', origin);
+          console.log('[CORS] allowing local dev origin', origin);
           return callback(null, true);
         }
       } catch (e) {
@@ -40,6 +43,7 @@ const corsOptions = {
       }
     }
 
+    console.warn('[CORS] denying origin', origin);
     return callback(new Error('CORS policy: This origin is not allowed: ' + origin));
   },
   credentials: true,

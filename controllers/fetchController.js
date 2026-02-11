@@ -165,6 +165,13 @@ async function listRemoteFiles({ branch, pos, date }) {
       headers = undefined;
     }
   }
+  const defaultHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:55.0) Gecko/20100101 Firefox/55.0',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    Referer: 'https://biggsph.com/',
+    Origin: 'https://biggsph.com',
+  };
   const method = (process.env.POS_LIST_METHOD || 'POST').toUpperCase();
 
   const maxRetries = Number(process.env.POS_LIST_RETRIES) || 3;
@@ -174,16 +181,17 @@ async function listRemoteFiles({ branch, pos, date }) {
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       if (method === 'GET') {
+        const mergedHeaders = { ...defaultHeaders, ...(headers || {}) };
         response = await require('axios')({
           url: listUrl,
           method,
-          headers,
+          headers: mergedHeaders,
           params: payload,
           timeout: timeoutMs,
         });
       } else {
         const formBody = new URLSearchParams(payload).toString();
-        const mergedHeaders = { 'Content-Type': 'application/x-www-form-urlencoded', ...headers };
+        const mergedHeaders = { 'Content-Type': 'application/x-www-form-urlencoded', ...defaultHeaders, ...(headers || {}) };
         response = await require('axios')({
           url: listUrl,
           method,
@@ -201,7 +209,18 @@ async function listRemoteFiles({ branch, pos, date }) {
   }
 
   const rawData = response.data;
+  if (process.env.POS_DEBUG === 'true') {
+    try {
+      console.log('[POS DEBUG] listRemoteFiles response', { listUrl, payload, rawData });
+    } catch (e) {
+      // ignore logging errors
+    }
+  }
   if (typeof rawData === 'string') {
+    const lowered = rawData.toLowerCase();
+    if (lowered.includes('no list') || lowered.includes('error') || lowered.includes('<!doctype html>')) {
+      return [];
+    }
     return rawData
       .split(',')
       .map((item) => item.trim())
@@ -240,20 +259,72 @@ function resolveFileUrl(item) {
   return `${baseUrl}${fallback}`;
 }
 
+async function collectFilesFromRange({ start, end, branches, positions }) {
+  const branchList = resolveBranchList(branches);
+  const posList = normalizePositions(positions || process.env.POS_POSITIONS || '1,2');
+  const dates = buildDateRange(start, end);
+  const fileList = [];
+
+  for (const branch of branchList) {
+    for (const pos of posList) {
+      for (const workDate of dates) {
+        const date = workDate.toISOString().slice(0, 10);
+        const items = await listRemoteFiles({ branch, pos, date });
+        for (const item of items) {
+          const url = resolveFileUrl(item);
+          if (!url) continue;
+          fileList.push({ url, branch, pos, workDate, sourceFile: url });
+        }
+      }
+    }
+  }
+
+  return fileList;
+}
+
+async function collectFilesFromMissing(branchesMissing) {
+  const fileList = [];
+  const branches = Object.keys(branchesMissing || {});
+
+  for (const branch of branches) {
+    const posEntries = branchesMissing[branch] || {};
+    for (const [posKey, dates] of Object.entries(posEntries)) {
+      const pos = Number(posKey);
+      for (const date of dates || []) {
+        const items = await listRemoteFiles({ branch, pos, date });
+        for (const item of items) {
+          const url = resolveFileUrl(item);
+          if (!url) continue;
+          fileList.push({ url, branch, pos, workDate: new Date(date), sourceFile: url });
+        }
+      }
+    }
+  }
+
+  return fileList;
+}
+
 exports.streamStatus = (req, res) => {
   const jobId = req.query.jobId || 'global';
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
   res.write('\n');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
   if (!clients.has(jobId)) clients.set(jobId, new Set());
   clients.get(jobId).add(res);
 
+  const heartbeat = setInterval(() => {
+    res.write(': heartbeat\n\n');
+  }, 15000);
+
   req.on('close', () => {
+    clearInterval(heartbeat);
     const set = clients.get(jobId);
     if (set) set.delete(res);
   });
@@ -263,45 +334,6 @@ exports.startFetch = async (req, res) => {
   const { start, end, files, branches, positions, mode } = req.body || {};
   const jobId = `${Date.now()}`;
 
-  let fileList = [];
-  if (Array.isArray(files) && files.length) {
-    fileList = files
-      .map((file) => ({
-        url: file.url || file.fileUrl || file,
-        branch: file.branch,
-        pos: file.pos != null ? Number(file.pos) : undefined,
-        workDate: file.workDate ? new Date(file.workDate) : undefined,
-        sourceFile: file.sourceFile,
-      }))
-      .filter((file) => Boolean(file.url));
-  }
-
-  if (!fileList.length && start && end) {
-    const branchList = resolveBranchList(branches);
-    const posList = normalizePositions(positions || process.env.POS_POSITIONS || '1,2');
-    const dates = buildDateRange(start, end);
-
-    for (const branch of branchList) {
-      for (const pos of posList) {
-        for (const workDate of dates) {
-          const date = workDate.toISOString().slice(0, 10);
-          const items = await listRemoteFiles({ branch, pos, date });
-          for (const item of items) {
-            const url = resolveFileUrl(item);
-            if (!url) continue;
-            fileList.push({ url, branch, pos, workDate, sourceFile: url });
-          }
-        }
-      }
-    }
-  }
-
-  if (!fileList.length) {
-    return res.status(400).json({
-      message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
-    });
-  }
-
   await FetchLog.create({
     jobId,
     status: 'queued',
@@ -310,67 +342,112 @@ exports.startFetch = async (req, res) => {
     endDate: end,
     branches: normalizeList(branches),
     positions: normalizePositions(positions),
-    filesTotal: fileList.length,
+    filesTotal: 0,
   });
 
-  res.status(202).json({ jobId, filesQueued: fileList.length });
+  res.status(202).json({ jobId, filesQueued: 0 });
 
-  const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
-  streamWorker.runJob({ jobId, files: fileList, batchSize });
+  broadcast(jobId, { type: 'queued', jobId, message: 'Collecting file list...' });
+
+  (async () => {
+    let fileList = [];
+    if (Array.isArray(files) && files.length) {
+      fileList = files
+        .map((file) => ({
+          url: file.url || file.fileUrl || file,
+          branch: file.branch,
+          pos: file.pos != null ? Number(file.pos) : undefined,
+          workDate: file.workDate ? new Date(file.workDate) : undefined,
+          sourceFile: file.sourceFile,
+        }))
+        .filter((file) => Boolean(file.url));
+    }
+
+    if (!fileList.length && start && end) {
+      fileList = await collectFilesFromRange({ start, end, branches, positions });
+    }
+
+    if (!fileList.length) {
+      await FetchLog.findOneAndUpdate(
+        { jobId },
+        { status: 'failed', errors: ['No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.'] }
+      );
+      broadcast(jobId, {
+        type: 'error',
+        jobId,
+        message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
+      });
+      return;
+    }
+
+    await FetchLog.findOneAndUpdate({ jobId }, { filesTotal: fileList.length });
+    broadcast(jobId, { type: 'queued', jobId, filesTotal: fileList.length, message: 'Starting ingestion.' });
+
+    const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
+    streamWorker.runJob({ jobId, files: fileList, batchSize });
+  })().catch(async (error) => {
+    const message = error && error.message ? error.message : 'Failed to prepare fetch job.';
+    await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
+    broadcast(jobId, { type: 'error', jobId, message });
+  });
 };
 
 exports.startMissingFetch = async (req, res) => {
   const { branches_missing: branchesMissing, files } = req.body || {};
   const jobId = `${Date.now()}`;
 
-  let fileList = [];
-  if (Array.isArray(files) && files.length) {
-    fileList = files
-      .map((file) => ({
-        url: file.url || file.fileUrl || file,
-        branch: file.branch,
-        pos: file.pos != null ? Number(file.pos) : undefined,
-        workDate: file.workDate ? new Date(file.workDate) : undefined,
-        sourceFile: file.sourceFile,
-      }))
-      .filter((file) => Boolean(file.url));
-  }
-
-  if (!fileList.length && branchesMissing) {
-    const branches = Object.keys(branchesMissing || {});
-    for (const branch of branches) {
-      const posEntries = branchesMissing[branch] || {};
-      for (const [posKey, dates] of Object.entries(posEntries)) {
-        const pos = Number(posKey);
-        for (const date of dates || []) {
-          const items = await listRemoteFiles({ branch, pos, date });
-          for (const item of items) {
-            const url = resolveFileUrl(item);
-            if (!url) continue;
-            fileList.push({ url, branch, pos, workDate: new Date(date), sourceFile: url });
-          }
-        }
-      }
-    }
-  }
-
-  if (!fileList.length) {
-    return res.status(400).json({
-      message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
-    });
-  }
-
   await FetchLog.create({
     jobId,
     status: 'queued',
     mode: 'missing',
-    filesTotal: fileList.length,
+    filesTotal: 0,
   });
 
-  res.status(202).json({ jobId, filesQueued: fileList.length });
+  res.status(202).json({ jobId, filesQueued: 0 });
 
-  const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
-  streamWorker.runJob({ jobId, files: fileList, batchSize });
+  broadcast(jobId, { type: 'queued', jobId, message: 'Collecting missing file list...' });
+
+  (async () => {
+    let fileList = [];
+    if (Array.isArray(files) && files.length) {
+      fileList = files
+        .map((file) => ({
+          url: file.url || file.fileUrl || file,
+          branch: file.branch,
+          pos: file.pos != null ? Number(file.pos) : undefined,
+          workDate: file.workDate ? new Date(file.workDate) : undefined,
+          sourceFile: file.sourceFile,
+        }))
+        .filter((file) => Boolean(file.url));
+    }
+
+    if (!fileList.length && branchesMissing) {
+      fileList = await collectFilesFromMissing(branchesMissing);
+    }
+
+    if (!fileList.length) {
+      await FetchLog.findOneAndUpdate(
+        { jobId },
+        { status: 'failed', errors: ['No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.'] }
+      );
+      broadcast(jobId, {
+        type: 'error',
+        jobId,
+        message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
+      });
+      return;
+    }
+
+    await FetchLog.findOneAndUpdate({ jobId }, { filesTotal: fileList.length });
+    broadcast(jobId, { type: 'queued', jobId, filesTotal: fileList.length, message: 'Starting ingestion.' });
+
+    const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
+    streamWorker.runJob({ jobId, files: fileList, batchSize });
+  })().catch(async (error) => {
+    const message = error && error.message ? error.message : 'Failed to prepare missing fetch job.';
+    await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
+    broadcast(jobId, { type: 'error', jobId, message });
+  });
 };
 
 exports.startFromLog = async (req, res) => {
@@ -395,46 +472,6 @@ exports.startFromLog = async (req, res) => {
   jobLogUpdates.set(jobId, logPath);
 
   const { files, branches, positions, mode } = req.body || {};
-  let fileList = [];
-
-  if (Array.isArray(files) && files.length) {
-    fileList = files
-      .map((file) => ({
-        url: file.url || file.fileUrl || file,
-        branch: file.branch,
-        pos: file.pos != null ? Number(file.pos) : undefined,
-        workDate: file.workDate ? new Date(file.workDate) : undefined,
-        sourceFile: file.sourceFile,
-      }))
-      .filter((file) => Boolean(file.url));
-  }
-
-  if (!fileList.length) {
-    const branchList = resolveBranchList(branches);
-    const posList = normalizePositions(positions || process.env.POS_POSITIONS || '1,2');
-    const dates = buildDateRange(startDate, endDate);
-
-    for (const branch of branchList) {
-      for (const pos of posList) {
-        for (const workDate of dates) {
-          const date = workDate.toISOString().slice(0, 10);
-          const items = await listRemoteFiles({ branch, pos, date });
-          for (const item of items) {
-            const url = resolveFileUrl(item);
-            if (!url) continue;
-            fileList.push({ url, branch, pos, workDate, sourceFile: url });
-          }
-        }
-      }
-    }
-  }
-
-  if (!fileList.length) {
-    jobLogUpdates.delete(jobId);
-    return res.status(400).json({
-      message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
-    });
-  }
 
   await FetchLog.create({
     jobId,
@@ -444,13 +481,57 @@ exports.startFromLog = async (req, res) => {
     endDate,
     branches: normalizeList(branches),
     positions: normalizePositions(positions),
-    filesTotal: fileList.length,
+    filesTotal: 0,
   });
 
-  res.status(202).json({ jobId, start: startDate, end: endDate, filesQueued: fileList.length });
+  res.status(202).json({ jobId, start: startDate, end: endDate, filesQueued: 0 });
 
-  const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
-  streamWorker.runJob({ jobId, files: fileList, batchSize });
+  broadcast(jobId, { type: 'queued', jobId, message: 'Collecting file list...' });
+
+  (async () => {
+    let fileList = [];
+
+    if (Array.isArray(files) && files.length) {
+      fileList = files
+        .map((file) => ({
+          url: file.url || file.fileUrl || file,
+          branch: file.branch,
+          pos: file.pos != null ? Number(file.pos) : undefined,
+          workDate: file.workDate ? new Date(file.workDate) : undefined,
+          sourceFile: file.sourceFile,
+        }))
+        .filter((file) => Boolean(file.url));
+    }
+
+    if (!fileList.length) {
+      fileList = await collectFilesFromRange({ start: startDate, end: endDate, branches, positions });
+    }
+
+    if (!fileList.length) {
+      jobLogUpdates.delete(jobId);
+      await FetchLog.findOneAndUpdate(
+        { jobId },
+        { status: 'failed', errors: ['No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.'] }
+      );
+      broadcast(jobId, {
+        type: 'error',
+        jobId,
+        message: 'No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.',
+      });
+      return;
+    }
+
+    await FetchLog.findOneAndUpdate({ jobId }, { filesTotal: fileList.length });
+    broadcast(jobId, { type: 'queued', jobId, filesTotal: fileList.length, message: 'Starting ingestion.' });
+
+    const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
+    streamWorker.runJob({ jobId, files: fileList, batchSize });
+  })().catch(async (error) => {
+    jobLogUpdates.delete(jobId);
+    const message = error && error.message ? error.message : 'Failed to prepare log-based fetch job.';
+    await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
+    broadcast(jobId, { type: 'error', jobId, message });
+  });
 };
 
 exports.getReports = async (req, res) => {
@@ -461,7 +542,11 @@ exports.getReports = async (req, res) => {
   if (pos) query.pos = Number(pos);
   if (date) {
     const workDate = new Date(String(date));
-    if (!Number.isNaN(workDate.getTime())) query.workDate = workDate;
+    if (!Number.isNaN(workDate.getTime())) {
+      const nextDay = new Date(workDate);
+      nextDay.setDate(nextDay.getDate() + 1);
+      query.workDate = { $gte: workDate, $lt: nextDay };
+    }
   }
 
   const pageNumber = Number(page) || 1;
@@ -477,4 +562,113 @@ exports.getReports = async (req, res) => {
   ]);
 
   res.json({ items, total, page: pageNumber, pageSize: pageLimit });
+};
+
+// Return distinct branch list from stored FileRecord or Report collections
+exports.getBranches = async (req, res) => {
+  try {
+    const FileRecord = require('../models/fileRecordModel');
+    // prefer FileRecord branches; fall back to Report collection if none
+    let branches = await FileRecord.distinct('branch');
+    branches = (branches || []).filter(Boolean).sort();
+    if (!branches.length) {
+      const Report = require('../models/reportModel');
+      branches = await Report.distinct('branch');
+      branches = (branches || []).filter(Boolean).sort();
+    }
+    res.json({ branches });
+  } catch (error) {
+    res.status(500).json({ message: error && error.message ? error.message : String(error) });
+  }
+};
+
+// Temporary debug endpoint to test listRemoteFiles parsing without running a full job
+exports.debugList = async (req, res) => {
+  const { branch, pos, date } = req.body || {};
+  try {
+    const files = await listRemoteFiles({ branch, pos, date });
+    return res.json({ files });
+  } catch (error) {
+    return res.status(500).json({ message: error && error.message ? error.message : String(error) });
+  }
+};
+
+// Stream raw file contents (from local storage path recorded in FileRecord)
+exports.streamFileRaw = async (req, res) => {
+  try {
+    const FileRecord = require('../models/fileRecordModel');
+    const { id } = req.params;
+    const record = await FileRecord.findById(id).lean();
+    if (!record || !record.storage || !record.storage.path) return res.status(404).json({ message: 'File not found' });
+
+    const filePath = record.storage.path;
+    if (!require('fs').existsSync(filePath)) return res.status(404).json({ message: 'File not found on disk' });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${record.filename || 'file.csv'}"`);
+    const stream = require('fs').createReadStream(filePath);
+    stream.on('error', (err) => {
+      console.warn('Stream error:', err && err.message ? err.message : err);
+      res.end();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    console.error('streamFileRaw error:', error);
+    res.status(500).json({ message: error && error.message ? error.message : String(error) });
+  }
+};
+
+// Stream parsed CSV rows as NDJSON for incremental rendering
+// If ?limit=N provided, buffer up to N rows and return as JSON array quickly
+exports.streamFileRows = async (req, res) => {
+  try {
+    const FileRecord = require('../models/fileRecordModel');
+    const { id } = req.params;
+    const limit = req.query && req.query.limit ? Number(req.query.limit) : 0;
+
+    const record = await FileRecord.findById(id).lean();
+    if (!record || !record.storage || !record.storage.path) return res.status(404).json({ message: 'File not found' });
+    const filePath = record.storage.path;
+    if (!require('fs').existsSync(filePath)) return res.status(404).json({ message: 'File not found on disk' });
+
+    const fs = require('fs');
+    const { parse } = require('csv-parse');
+
+    // Preview mode: return buffered JSON array
+    if (limit && limit > 0) {
+      const rows = [];
+      const parser = fs.createReadStream(filePath).pipe(parse({ columns: true, relax_quotes: true, relax_column_count: true, skip_empty_lines: true, trim: true }));
+      for await (const row of parser) {
+        rows.push(row);
+        if (rows.length >= limit) break;
+      }
+      return res.json({ items: rows, preview: true });
+    }
+
+    // Full streaming as NDJSON
+    res.setHeader('Content-Type', 'application/x-ndjson');
+    res.setHeader('Cache-Control', 'no-cache');
+
+    const parser = fs.createReadStream(filePath).pipe(parse({ columns: true, relax_quotes: true, relax_column_count: true, skip_empty_lines: true, trim: true }));
+
+    parser.on('error', (err) => {
+      console.warn('CSV parse error:', err && err.message ? err.message : err);
+      // end the response
+      try { res.end(); } catch (e) {}
+    });
+
+    for await (const row of parser) {
+      // write each row as a JSON line
+      const ok = res.write(`${JSON.stringify(row)}\n`);
+      if (!ok) {
+        // backpressure: wait for drain
+        await new Promise((resolve) => res.once('drain', resolve));
+      }
+    }
+
+    res.end();
+  } catch (error) {
+    console.error('streamFileRows error:', error);
+    res.status(500).json({ message: error && error.message ? error.message : String(error) });
+  }
 };

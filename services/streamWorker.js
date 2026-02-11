@@ -70,10 +70,11 @@ class StreamWorker extends EventEmitter {
         const source = response.data;
 
         let fileWritePromise = null;
+        let filePath = null;
         if (writeLatest) {
           fs.mkdirSync(latestDir, { recursive: true });
           const filename = path.basename(String(meta.sourceFile || url));
-          const filePath = path.join(latestDir, filename);
+          filePath = path.join(latestDir, filename);
           const fileStream = fs.createWriteStream(filePath);
           fileWritePromise = new Promise((resolve, reject) => {
             fileStream.on('finish', resolve);
@@ -100,15 +101,19 @@ class StreamWorker extends EventEmitter {
 
         for await (const row of parser) {
           const normalized = normalizeRow(row);
-          batch.push({
+          const uniqueKey = buildUniqueKey(normalized, meta);
+          const record = {
             jobId: meta.jobId,
             branch: meta.branch,
             pos: meta.pos,
             workDate: meta.workDate,
-            uniqueKey: buildUniqueKey(normalized, meta),
             sourceFile: meta.sourceFile || url,
             ingestedAt: new Date(),
             data: normalized,
+          };
+          if (uniqueKey) record.uniqueKey = uniqueKey;
+          batch.push({
+            ...record,
           });
 
           if (batch.length >= meta.batchSize) {
@@ -136,6 +141,26 @@ class StreamWorker extends EventEmitter {
         }
 
         if (fileWritePromise) await fileWritePromise;
+
+        // Persist a FileRecord document for the downloaded file (if written locally)
+        try {
+          if (filePath) {
+            const stats = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
+            const FileRecord = require('../models/fileRecordModel');
+            await FileRecord.create({
+              filename: path.basename(filePath),
+              branch: meta.branch,
+              pos: meta.pos,
+              workDate: meta.workDate,
+              storage: { type: 'local', path: filePath },
+              size: stats ? stats.size : undefined,
+              status: 'raw',
+            });
+          }
+        } catch (e) {
+          // Non-fatal: log and continue
+          console.warn('Failed to create FileRecord:', e && e.message ? e.message : e);
+        }
 
         return totalRows;
       } catch (error) {

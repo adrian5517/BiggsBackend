@@ -9,6 +9,24 @@ if (!process.env.JWT_SECRET) {
     console.warn('Warning: JWT_SECRET is not set. Using development fallback secret. Set JWT_SECRET in production.');
 }
 
+// Cookie parsing helpers (used by multiple auth handlers)
+function parseCookies(req) {
+    const header = req && req.headers && req.headers.cookie;
+    if (!header) return {};
+    return header.split(';').reduce((acc, part) => {
+        const [key, ...rest] = part.trim().split('=');
+        if (!key) return acc;
+        acc[key] = decodeURIComponent(rest.join('='));
+        return acc;
+    }, {});
+}
+
+function readCookie(req, name) {
+    if (!req || !name) return null;
+    const cookies = parseCookies(req);
+    return cookies[name] || null;
+}
+
 const registerUser = async (req, res) => {
     const { username, email, password, role } = req.body;
 
@@ -130,6 +148,20 @@ const loginUser = async (req, res) => {
         } catch (e) {
             console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
         }
+            try {
+                const cookieOpts = { httpOnly: true, sameSite: 'none' };
+                // For cross-site cookies, SameSite=None requires Secure attribute.
+                // Ensure Secure is set when SameSite is 'none'. In production this will
+                // also restrict cookies to HTTPS. If you need to test on localhost over
+                // HTTP, consider using a local HTTPS dev server or an env flag.
+                if (String(cookieOpts.sameSite).toLowerCase() === 'none') {
+                    cookieOpts.secure = true;
+                }
+                if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
+                res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
+            } catch (e) {
+                console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
+            }
 
         // Don't send password in response
         const userResponse = {
@@ -192,6 +224,17 @@ const logoutUser = async (req, res) => {
         }
         res.clearCookie('refreshToken');
         res.clearCookie('token');
+            // Clear cookies with matching attributes to ensure proper removal in cross-site contexts
+            try {
+                res.clearCookie('refreshToken', { path: '/', sameSite: 'none', secure: true });
+            } catch (e) {
+                res.clearCookie('refreshToken');
+            }
+            try {
+                res.clearCookie('token', { path: '/', sameSite: 'none', secure: true });
+            } catch (e) {
+                res.clearCookie('token');
+            }
         res.status(200).json({ message: 'Logout successful' });
     } catch (error) {
         res.status(500).json({ message: 'Error logging out', error: error.message });
@@ -281,23 +324,7 @@ const uploadProfilePicture = async (req, res) => {
                 console.error('Cloudinary upload failed:', err);
                 return res.status(500).json({ success: false, message: 'Image upload failed', error: String(err.message || err) });
             }
-
-            function parseCookies(req) {
-                const header = req.headers && req.headers.cookie;
-                if (!header) return {};
-                return header.split(';').reduce((acc, part) => {
-                    const [key, ...rest] = part.trim().split('=');
-                    if (!key) return acc;
-                    acc[key] = decodeURIComponent(rest.join('='));
-                    return acc;
-                }, {});
-            }
-
-            function readCookie(req, name) {
-                if (!req || !name) return null;
-                const cookies = parseCookies(req);
-                return cookies[name] || null;
-            }
+            
         }
 
         if (!imageUrl) {
