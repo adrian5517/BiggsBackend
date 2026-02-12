@@ -16,8 +16,8 @@ const {registerUser,
 router.post('/register', registerUser);
 //Login Route
 router.post('/login',loginUser);
-//Logout Route
-router.post('/logout', authMiddleware.protect, logoutUser);
+//Logout Route - allow unauthenticated requests so clients can clear refresh cookies even when access token expired
+router.post('/logout', logoutUser);
 //Refresh Token Route
 router.post('/refresh-token', refreshAccessToken);
 //Profile Picture Upload Route
