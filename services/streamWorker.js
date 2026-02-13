@@ -64,7 +64,8 @@ class StreamWorker extends EventEmitter {
   async ingestFile(url, meta) {
     const maxRetries = Number(process.env.POS_FILE_RETRIES) || 3;
     const writeLatest = process.env.POS_WRITE_LATEST !== 'false';
-    const latestDir = process.env.POS_LATEST_DIR || 'latest';
+    // Directory to write downloaded CSVs. Organized as <downloadDir>/<branch>/<YYYY-MM-DD>/
+    const downloadDir = process.env.POS_DOWNLOAD_DIR || process.env.POS_LATEST_DIR || 'latest';
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
@@ -74,9 +75,13 @@ class StreamWorker extends EventEmitter {
         let fileWritePromise = null;
         let filePath = null;
         if (writeLatest) {
-          fs.mkdirSync(latestDir, { recursive: true });
-          const filename = path.basename(String(meta.sourceFile || url));
-          filePath = path.join(latestDir, filename);
+          const branchSafe = meta.branch ? String(meta.branch).replace(/[<>:"/\\|?*]/g, '_') : 'unknown';
+          const dateSafe = meta.workDate ? new Date(meta.workDate).toISOString().slice(0, 10) : 'unknown';
+          const baseDir = path.join(downloadDir, branchSafe, dateSafe);
+          fs.mkdirSync(baseDir, { recursive: true });
+          const origFilename = path.basename(String(meta.sourceFile || url));
+          const filename = `${meta.pos != null ? ('pos' + meta.pos + '_') : ''}${origFilename}`;
+          filePath = path.join(baseDir, filename);
           const fileStream = fs.createWriteStream(filePath);
           fileWritePromise = new Promise((resolve, reject) => {
             fileStream.on('finish', resolve);

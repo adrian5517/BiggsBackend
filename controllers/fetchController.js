@@ -4,6 +4,8 @@ const path = require('path');
 const StreamWorker = require('../services/streamWorker');
 const FetchLog = require('../models/fetchLogModel');
 const Report = require('../models/reportModel');
+const jobBus = require('../services/jobBus');
+const combinerWorker = require('../services/combinerWorker');
 
 const streamWorker = new StreamWorker();
 const clients = new Map();
@@ -49,6 +51,23 @@ streamWorker.on('complete', (data) => {
       console.warn('Failed to update last_record.log:', error && error.message ? error.message : error);
     }
   }
+});
+
+// forward combiner jobBus events to SSE clients
+jobBus.on('progress', (data) => {
+  broadcast(data.jobId || 'global', { type: 'progress', ...data });
+});
+jobBus.on('file-start', (data) => {
+  broadcast(data.jobId || 'global', { type: 'file-start', ...data });
+});
+jobBus.on('file-complete', (data) => {
+  broadcast(data.jobId || 'global', { type: 'file-complete', ...data });
+});
+jobBus.on('error', (data) => {
+  broadcast(data.jobId || 'global', { type: 'error', ...data });
+});
+jobBus.on('complete', (data) => {
+  broadcast(data.jobId || 'global', { type: 'complete', ...data });
 });
 
 function normalizeList(value) {
@@ -392,6 +411,22 @@ exports.startFetch = async (req, res) => {
   });
 };
 
+// Manual fetch helper: accepts { date, branches, positions, files }
+// Sets start and end to the provided date and delegates to startFetch
+exports.manualFetch = async (req, res) => {
+  const date = req.body && req.body.date ? String(req.body.date) : null;
+  if (!date) return res.status(400).json({ message: 'Missing required field: date' });
+
+  // copy existing body and set start/end to the provided date
+  req.body = {
+    ...(req.body || {}),
+    start: date,
+    end: date,
+  };
+
+  return exports.startFetch(req, res);
+};
+
 exports.startMissingFetch = async (req, res) => {
   const { branches_missing: branchesMissing, files } = req.body || {};
   const jobId = `${Date.now()}`;
@@ -532,6 +567,91 @@ exports.startFromLog = async (req, res) => {
     await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
     broadcast(jobId, { type: 'error', jobId, message });
   });
+};
+
+// Start a combiner job which scans a workdir and produces combined/master output
+exports.startCombine = async (req, res) => {
+  const { workdir = process.env.COMBINER_WORKDIR || 'latest', outFile } = req.body || {};
+  const jobId = `${Date.now()}`;
+
+  await FetchLog.create({ jobId, status: 'queued', mode: 'combine', filesTotal: 0 });
+
+  res.status(202).json({ jobId, workdir });
+
+  broadcast(jobId, { type: 'queued', jobId, message: `Starting combiner for workdir=${workdir}` });
+
+  (async () => {
+    try {
+      await combinerWorker.runJob({ jobId, workdir, outFile });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
+      broadcast(jobId, { type: 'error', jobId, message });
+    }
+  })();
+};
+
+// Scan missing branch/pos/date combinations; if `autoQueue` true, queue a missing-fetch job
+exports.scanMissing = async (req, res) => {
+  try {
+    const missingScanner = require('../services/missingScanner');
+    const { workdir, start, end, branches, positions, sampleFile, autoQueue } = req.body || {};
+    const parsedBranches = Array.isArray(branches) ? branches : branches ? String(branches).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    const parsedPositions = Array.isArray(positions) ? positions.map(String) : positions ? String(positions).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+
+    const result = await missingScanner.scan({ workdir, start, end, branches: parsedBranches, positions: parsedPositions, sampleFile });
+
+    // If not auto-queueing, return scan results immediately
+    if (!autoQueue) return res.json(result);
+
+    // Build branches_missing shape expected by startMissingFetch / collectFilesFromMissing
+    const branches_missing = {};
+    for (const r of result.results || []) {
+      if (r.missingDates && r.missingDates.length) {
+        branches_missing[r.branch] = branches_missing[r.branch] || {};
+        branches_missing[r.branch][String(r.pos)] = r.missingDates;
+      }
+    }
+
+    if (!Object.keys(branches_missing).length) {
+      return res.status(200).json({ ...result, queued: false, message: 'No missing combinations found to queue.' });
+    }
+
+    const jobId = `${Date.now()}`;
+    await FetchLog.create({ jobId, status: 'queued', mode: 'missing-scan-queue', filesTotal: 0 });
+
+    res.status(202).json({ ...result, queued: true, jobId });
+
+    broadcast(jobId, { type: 'queued', jobId, message: `Queued missing-fetch job for ${Object.keys(branches_missing).length} branches` });
+
+    // Start async job similar to startMissingFetch
+    (async () => {
+      try {
+        let fileList = [];
+        fileList = await collectFilesFromMissing(branches_missing);
+
+        if (!fileList.length) {
+          await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: ['No files to fetch for missing combinations.'] });
+          broadcast(jobId, { type: 'error', jobId, message: 'No files to fetch for missing combinations.' });
+          return;
+        }
+
+        await FetchLog.findOneAndUpdate({ jobId }, { filesTotal: fileList.length });
+        broadcast(jobId, { type: 'queued', jobId, filesTotal: fileList.length, message: 'Starting ingestion for missing combinations.' });
+
+        const batchSize = Number(process.env.POS_BATCH_SIZE) || 1000;
+        streamWorker.runJob({ jobId, files: fileList, batchSize });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        await FetchLog.findOneAndUpdate({ jobId }, { status: 'failed', errors: [message] });
+        broadcast(jobId, { type: 'error', jobId, message });
+      }
+    })();
+
+    return;
+  } catch (error) {
+    return res.status(500).json({ message: error && error.message ? error.message : String(error) });
+  }
 };
 
 exports.getReports = async (req, res) => {

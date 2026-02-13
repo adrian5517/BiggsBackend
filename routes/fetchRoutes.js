@@ -62,4 +62,12 @@ router.get('/reports', authMiddleware.protect, fetchController.getReports);
 // Get list of branches (distinct)
 router.get('/branches', authMiddleware.protect, fetchController.getBranches);
 
+// Manual fetch for a single date with branch list (client sends { date, branches, positions, files })
+router.post('/manual', authMiddleware.protect, fetchController.manualFetch);
+
+// Start combiner job: scans a workdir (e.g., 'latest') and runs combine/enrichment
+router.post('/combine/start', authMiddleware.protect, fetchController.startCombine);
+// Scan for missing branch/pos/date combinations in a workdir
+router.post('/missing/scan', authMiddleware.protect, fetchController.scanMissing);
+
 module.exports = router;

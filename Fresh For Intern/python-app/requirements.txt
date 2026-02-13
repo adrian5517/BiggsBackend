@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+redis
+rq
+pymongo
+python-dotenv
+requests
+fastapi
+uvicorn[standard]
+requests
+pymongo[bson]
+boto3
+rq
+redis
+python-dotenv
+pandas
+tqdm
