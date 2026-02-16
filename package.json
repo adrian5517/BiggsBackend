@@ -5,7 +5,18 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "worker": "node workers/processor.js",
+    "start:scheduler": "node scripts/start_scheduler.js",
+    "migrate:pg": "node scripts/migrate_pg.js",
+    "prune:backups": "node scripts/prune_backups.js",
+    "inspect:db": "node scripts/inspect_collections.js",
+    "prune:reports": "node scripts/prune_reports.js",
+    "inspect:reports": "node scripts/report_date_range.js",
+    "redis:up": "docker compose -f docker-compose.redis.yml up -d",
+    "redis:down": "docker compose -f docker-compose.redis.yml down",
+    "redis:logs": "docker logs -f redis-staging",
+    "redis:show-url": "node scripts/show_redis_url.js"
   },
   "keywords": [],
   "author": "",
@@ -20,15 +31,15 @@
     "cors": "^2.8.6",
     "cronjob": "^0.1.0",
     "csv-parse": "^5.6.0",
-    "dotenv": "^17.2.4",
+    "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "ioredis": "^5.9.2",
     "jsonwebtoken": "^9.0.3",
-    "mongodb-memory-server": "^8.16.1",
-    "mongoose": "^9.2.0",
+    
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemon": "^3.1.11",
+    "pg": "^8.18.0",
     "redis": "^5.10.0",
     "streamifier": "^0.1.1"
   }

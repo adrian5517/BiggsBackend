@@ -70,3 +70,26 @@ exports.getCsv = async (req, res) => {
 // export parser for reuse
 exports.parseCSV = parseCSV
 
+// Debug echo endpoint: returns parsed JSON body and some request metadata
+exports.echo = async (req, res) => {
+  try {
+    const body = req.body || null
+    const headers = req.headers || {}
+    // include a safe preview of cookies and content-type
+    const result = {
+      receivedAt: new Date().toISOString(),
+      body,
+      headers: {
+        'content-type': headers['content-type'] || null,
+        cookie: headers['cookie'] || null,
+        origin: headers['origin'] || null,
+        host: headers['host'] || null,
+      }
+    }
+    return res.status(200).json(result)
+  } catch (err) {
+    console.error('Echo debug error:', err)
+    return res.status(500).json({ message: 'Echo failed', error: String(err && err.message) })
+  }
+}
+

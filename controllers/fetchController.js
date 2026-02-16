@@ -237,7 +237,20 @@ async function listRemoteFiles({ branch, pos, date }) {
   }
   if (typeof rawData === 'string') {
     const lowered = rawData.toLowerCase();
-    if (lowered.includes('no list') || lowered.includes('error') || lowered.includes('<!doctype html>')) {
+    const isNoList = lowered.includes('no list') || lowered.includes('no files') || lowered.includes('error') || lowered.includes('<!doctype html>');
+    if (isNoList) {
+      // If caller configured fallback files via env, use them (JSON array string)
+      if (process.env.POS_LIST_FALLBACK_FILES) {
+        try {
+          const parsed = JSON.parse(process.env.POS_LIST_FALLBACK_FILES);
+          if (Array.isArray(parsed) && parsed.length) {
+            if (process.env.POS_DEBUG === 'true') console.log('[POS DEBUG] using POS_LIST_FALLBACK_FILES', parsed);
+            return parsed;
+          }
+        } catch (e) {
+          if (process.env.POS_DEBUG === 'true') console.warn('[POS DEBUG] failed to parse POS_LIST_FALLBACK_FILES', e && e.message ? e.message : e);
+        }
+      }
       return [];
     }
     return rawData
@@ -248,34 +261,33 @@ async function listRemoteFiles({ branch, pos, date }) {
 
   const path = process.env.POS_LIST_RESPONSE_PATH || 'files';
   const files = getPathValue(rawData, path) || [];
+  if (Array.isArray(files) && files.length) return files;
+
+  // if empty and fallback configured, return fallback
+  if ((!files || files.length === 0) && process.env.POS_LIST_FALLBACK_FILES) {
+    try {
+      const parsed = JSON.parse(process.env.POS_LIST_FALLBACK_FILES);
+      if (Array.isArray(parsed) && parsed.length) {
+        if (process.env.POS_DEBUG === 'true') console.log('[POS DEBUG] using POS_LIST_FALLBACK_FILES (response path empty)', parsed);
+        return parsed;
+      }
+    } catch (e) {
+      if (process.env.POS_DEBUG === 'true') console.warn('[POS DEBUG] failed to parse POS_LIST_FALLBACK_FILES', e && e.message ? e.message : e);
+    }
+  }
+
   return Array.isArray(files) ? files : [];
 }
 
+const posService = require('../services/pos');
+
 function resolveFileUrl(item) {
-  if (!item) return null;
-  const template = process.env.POS_FILE_URL_TEMPLATE;
-  const explicitField = process.env.POS_FILE_URL_FIELD;
-  const baseUrl = process.env.POS_FILE_BASE_URL || 'https://biggsph.com/biggsinc_loyalty/controller/';
-
-  if (typeof item === 'string') {
-    const value = item;
-    if (template) return template.replace(/\{\{\s*file\s*\}\}/g, value);
-    if (/^https?:\/\//i.test(value)) return value;
-    return `${baseUrl}${value}`;
+  try {
+    return posService.buildFileUrl(item);
+  } catch (e) {
+    if (process.env.POS_DEBUG === 'true') console.warn('[POS DEBUG] resolveFileUrl error', e && e.message ? e.message : e);
+    return null;
   }
-
-  if (explicitField && item[explicitField]) {
-    const value = item[explicitField];
-    if (template) return template.replace(/\{\{\s*file\s*\}\}/g, value);
-    if (/^https?:\/\//i.test(value)) return value;
-    return `${baseUrl}${value}`;
-  }
-
-  const fallback = item.url || item.fileUrl || item.path || item.filename || item.file || item.name;
-  if (!fallback) return null;
-  if (template) return template.replace(/\{\{\s*file\s*\}\}/g, fallback);
-  if (/^https?:\/\//i.test(fallback)) return fallback;
-  return `${baseUrl}${fallback}`;
 }
 
 async function collectFilesFromRange({ start, end, branches, positions }) {
@@ -353,16 +365,25 @@ exports.startFetch = async (req, res) => {
   const { start, end, files, branches, positions, mode } = req.body || {};
   const jobId = `${Date.now()}`;
 
-  await FetchLog.create({
-    jobId,
-    status: 'queued',
-    mode: mode || 'range',
-    startDate: start,
-    endDate: end,
-    branches: normalizeList(branches),
-    positions: normalizePositions(positions),
-    filesTotal: 0,
-  });
+  try {
+    const pgLog = await FetchLog.create({
+      jobId,
+      status: 'queued',
+      mode: mode || 'range',
+      startDate: start,
+      endDate: end,
+      branches: normalizeList(branches),
+      positions: normalizePositions(positions),
+      filesTotal: 0,
+    });
+  } catch (err) {
+    console.error('Failed to create FetchLog (startFetch):', err && err.stack ? err.stack : err);
+    const isMongoQuota = err && (err.name === 'MongoServerError' || (err.message && String(err.message).toLowerCase().includes('over your space quota')));
+    if (isMongoQuota) {
+      return res.status(507).json({ message: 'MongoDB storage quota exceeded. Free up space or upgrade your plan.' });
+    }
+    return res.status(500).json({ message: err && err.message ? err.message : 'Failed to create fetch log' });
+  }
 
   res.status(202).json({ jobId, filesQueued: 0 });
 
@@ -388,9 +409,9 @@ exports.startFetch = async (req, res) => {
 
     if (!fileList.length) {
       await FetchLog.findOneAndUpdate(
-        { jobId },
-        { status: 'failed', errors: ['No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.'] }
-      );
+          { jobId },
+          { status: 'failed', errors: ['No files to fetch. Provide files[] or configure POS_LIST_URL and POS_FILE_URL_TEMPLATE.'] }
+        );
       broadcast(jobId, {
         type: 'error',
         jobId,
@@ -414,29 +435,54 @@ exports.startFetch = async (req, res) => {
 // Manual fetch helper: accepts { date, branches, positions, files }
 // Sets start and end to the provided date and delegates to startFetch
 exports.manualFetch = async (req, res) => {
-  const date = req.body && req.body.date ? String(req.body.date) : null;
-  if (!date) return res.status(400).json({ message: 'Missing required field: date' });
+  try {
+    // Accept date from body or query string for convenience
+    const date = (req.body && req.body.date) ? String(req.body.date) : (req.query && req.query.date ? String(req.query.date) : null);
+    if (!date) return res.status(400).json({ message: 'Missing required field: date' });
 
-  // copy existing body and set start/end to the provided date
-  req.body = {
-    ...(req.body || {}),
-    start: date,
-    end: date,
-  };
+    // Accept optional branches/positions from query as fallback
+    const queryBranches = req.query && (req.query.branches || req.query.branch) ? (req.query.branches || req.query.branch) : undefined;
+    const queryPositions = req.query && (req.query.positions || req.query.pos) ? (req.query.positions || req.query.pos) : undefined;
 
-  return exports.startFetch(req, res);
+    // copy existing body and set start/end to the provided date; merge query fallbacks
+    req.body = {
+      ...(req.body || {}),
+      start: date,
+      end: date,
+      branches: (req.body && req.body.branches) ? req.body.branches : queryBranches,
+      positions: (req.body && req.body.positions) ? req.body.positions : queryPositions,
+    };
+
+    // Delegate to startFetch and ensure any unexpected errors are returned as JSON
+    await exports.startFetch(req, res);
+  } catch (error) {
+    console.error('manualFetch error:', error && error.stack ? error.stack : error);
+    if (!res.headersSent) {
+      return res.status(500).json({ message: error && error.message ? error.message : 'Server error' });
+    }
+    return;
+  }
 };
 
 exports.startMissingFetch = async (req, res) => {
   const { branches_missing: branchesMissing, files } = req.body || {};
   const jobId = `${Date.now()}`;
 
-  await FetchLog.create({
-    jobId,
-    status: 'queued',
-    mode: 'missing',
-    filesTotal: 0,
-  });
+  try {
+    const pgLog = await FetchLog.create({
+      jobId,
+      status: 'queued',
+      mode: 'missing',
+      filesTotal: 0,
+    });
+  } catch (err) {
+      console.error('Failed to create FetchLog (startMissingFetch):', err && err.stack ? err.stack : err);
+      const isMongoQuota = err && (err.name === 'MongoServerError' || (err.message && String(err.message).toLowerCase().includes('over your space quota')));
+      if (isMongoQuota) {
+        return res.status(507).json({ message: 'MongoDB storage quota exceeded. Free up space or upgrade your plan.' });
+      }
+      return res.status(500).json({ message: err && err.message ? err.message : 'Failed to create fetch log' });
+  }
 
   res.status(202).json({ jobId, filesQueued: 0 });
 
@@ -508,16 +554,26 @@ exports.startFromLog = async (req, res) => {
 
   const { files, branches, positions, mode } = req.body || {};
 
-  await FetchLog.create({
-    jobId,
-    status: 'queued',
-    mode: mode || 'range',
-    startDate,
-    endDate,
-    branches: normalizeList(branches),
-    positions: normalizePositions(positions),
-    filesTotal: 0,
-  });
+  try {
+    const pgLog = await FetchLog.create({
+      jobId,
+      status: 'queued',
+      mode: mode || 'range',
+      startDate,
+      endDate,
+      branches: normalizeList(branches),
+      positions: normalizePositions(positions),
+      filesTotal: 0,
+    });
+      
+  } catch (err) {
+    console.error('Failed to create FetchLog (startFromLog):', err && err.stack ? err.stack : err);
+    const isMongoQuota = err && (err.name === 'MongoServerError' || (err.message && String(err.message).toLowerCase().includes('over your space quota')));
+    if (isMongoQuota) {
+      return res.status(507).json({ message: 'MongoDB storage quota exceeded. Free up space or upgrade your plan.' });
+    }
+    return res.status(500).json({ message: err && err.message ? err.message : 'Failed to create fetch log' });
+  }
 
   res.status(202).json({ jobId, start: startDate, end: endDate, filesQueued: 0 });
 
@@ -574,7 +630,16 @@ exports.startCombine = async (req, res) => {
   const { workdir = process.env.COMBINER_WORKDIR || 'latest', outFile } = req.body || {};
   const jobId = `${Date.now()}`;
 
-  await FetchLog.create({ jobId, status: 'queued', mode: 'combine', filesTotal: 0 });
+  try {
+    const pgLog = await FetchLog.create({ jobId, status: 'queued', mode: 'combine', filesTotal: 0 });
+  } catch (err) {
+    console.error('Failed to create FetchLog (startCombine):', err && err.stack ? err.stack : err);
+    const isMongoQuota = err && (err.name === 'MongoServerError' || (err.message && String(err.message).toLowerCase().includes('over your space quota')));
+    if (isMongoQuota) {
+      return res.status(507).json({ message: 'MongoDB storage quota exceeded. Free up space or upgrade your plan.' });
+    }
+    return res.status(500).json({ message: err && err.message ? err.message : 'Failed to create fetch log' });
+  }
 
   res.status(202).json({ jobId, workdir });
 
@@ -618,7 +683,12 @@ exports.scanMissing = async (req, res) => {
     }
 
     const jobId = `${Date.now()}`;
-    await FetchLog.create({ jobId, status: 'queued', mode: 'missing-scan-queue', filesTotal: 0 });
+      try {
+      const pgLog = await FetchLog.create({ jobId, status: 'queued', mode: 'missing-scan-queue', filesTotal: 0 });
+    } catch (err) {
+      console.error('Failed to create FetchLog (scanMissing autoQueue):', err && err.stack ? err.stack : err);
+      return res.status(500).json({ message: err && err.message ? err.message : 'Failed to create fetch log' });
+    }
 
     res.status(202).json({ ...result, queued: true, jobId });
 
@@ -635,7 +705,6 @@ exports.scanMissing = async (req, res) => {
           broadcast(jobId, { type: 'error', jobId, message: 'No files to fetch for missing combinations.' });
           return;
         }
-
         await FetchLog.findOneAndUpdate({ jobId }, { filesTotal: fileList.length });
         broadcast(jobId, { type: 'queued', jobId, filesTotal: fileList.length, message: 'Starting ingestion for missing combinations.' });
 
@@ -718,7 +787,7 @@ exports.streamFileRaw = async (req, res) => {
   try {
     const FileRecord = require('../models/fileRecordModel');
     const { id } = req.params;
-    const record = await FileRecord.findById(id).lean();
+    const record = await FileRecord.findById(id);
     if (!record || !record.storage || !record.storage.path) return res.status(404).json({ message: 'File not found' });
 
     const filePath = record.storage.path;
@@ -746,7 +815,7 @@ exports.streamFileRows = async (req, res) => {
     const { id } = req.params;
     const limit = req.query && req.query.limit ? Number(req.query.limit) : 0;
 
-    const record = await FileRecord.findById(id).lean();
+    const record = await FileRecord.findById(id);
     if (!record || !record.storage || !record.storage.path) return res.status(404).json({ message: 'File not found' });
     const filePath = record.storage.path;
     if (!require('fs').existsSync(filePath)) return res.status(404).json({ message: 'File not found on disk' });

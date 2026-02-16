@@ -2,7 +2,10 @@ const path = require('path')
 const fs = require('fs')
 // load repo .env if present
 require('dotenv').config({ path: path.resolve(__dirname, '..', '..', '.env') })
-const mongoose = require('mongoose')
+let mongoose = null;
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+  try { mongoose = require('mongoose') } catch (e) { mongoose = null }
+}
 const { buildLookups } = require('../combiner/lookupBuilder')
 const { processRd5000 } = require('../combiner/streamParser')
 
@@ -11,6 +14,9 @@ const FileRecord = require('../../models/fileRecordModel')
 const MonitorEntry = require('../../models/monitorEntryModel')
 
 async function ensureConnected() {
+  if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+    throw new Error('MongoDB disabled (ENABLE_MONGO!=true) — worker actions that require MongoDB are unavailable')
+  }
   if (mongoose.connection.readyState === 1) return
   const uri = process.env.MONGO_URI
   if (!uri) throw new Error('MONGO_URI not set')

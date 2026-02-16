@@ -1,12 +1,16 @@
 const User = require('../models/usersModel');
+const fs = require('fs');
+const path = require('path');
 const jwt = require('jsonwebtoken');
 const streamifier = require('streamifier');
 const cloudinary = require('../cloudinary');
 
-// Use a fallback JWT secret in development to avoid runtime crashes when env is missing.
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_jwt_secret';
-if (!process.env.JWT_SECRET) {
-    console.warn('Warning: JWT_SECRET is not set. Using development fallback secret. Set JWT_SECRET in production.');
+// Helper to read JWT secret at runtime (avoid capturing at module load)
+function getJwtSecret() {
+    if (!process.env.JWT_SECRET) {
+        console.warn('Warning: JWT_SECRET is not set. Using development fallback secret. Set JWT_SECRET in production.');
+    }
+    return process.env.JWT_SECRET || 'dev_jwt_secret';
 }
 
 // Cookie parsing helpers (used by multiple auth handlers)
@@ -69,7 +73,7 @@ const registerUser = async (req, res) => {
         await newUser.save();
 
         // Use the access token generator defined on the model (with fallback secret)
-        const token = newUser.generateAccessToken ? newUser.generateAccessToken() : jwt.sign({ id: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '7d' });
+        const token = newUser.generateAccessToken ? newUser.generateAccessToken() : jwt.sign({ id: newUser._id, role: newUser.role }, getJwtSecret(), { expiresIn: '7d' });
 
         // Don't send password in response
         const userResponse = {
@@ -94,6 +98,18 @@ const registerUser = async (req, res) => {
 
 const loginUser = async (req, res) => {
     const { identifier, email, username, password } = req.body;
+    // Debug: log incoming login payload for troubleshooting client 400s
+    try { console.debug('[auth] login request body:', JSON.stringify(req.body)) } catch (e) {}
+    try {
+        // persist to tmp/auth_requests.log for external tailing
+        const tmpDir = path.join(__dirname, '..', 'tmp');
+        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+        const logPath = path.join(tmpDir, 'auth_requests.log');
+        const line = JSON.stringify({ ts: new Date().toISOString(), body: req.body }) + '\n';
+        fs.appendFileSync(logPath, line);
+    } catch (e) {
+        // ignore file write errors
+    }
 
     // Accept `identifier` (preferred), or `email` or `username` for backward compatibility
     const loginKey = (identifier || email || username || '').trim();
@@ -109,8 +125,24 @@ const loginUser = async (req, res) => {
 
         if (!user) {
             console.log('User not found with identifier:', loginKey);
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, found: false, reason: 'not_found' }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (e) {}
             return res.status(400).json({ message: 'Invalid credentials' });
         }
+        // Log user id and a short prefix of stored hash for debugging (do not log full secret)
+        try {
+            const tmpDir = path.join(__dirname, '..', 'tmp');
+            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+            const logPath = path.join(tmpDir, 'auth_results.log');
+            const hashPrefix = user.password ? String(user.password).slice(0, 12) : null;
+            const infoLine = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, userId: user.id || user._id, hashPrefix }) + '\n';
+            fs.appendFileSync(logPath, infoLine);
+        } catch (e) {}
 
         console.log('Comparing passwords...');
         const isPasswordMatch = await user.comparePassword(password);
@@ -118,11 +150,19 @@ const loginUser = async (req, res) => {
 
         if (!isPasswordMatch) {
             console.log('Password does not match for identifier:', loginKey);
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const candidateLen = password ? Buffer.byteLength(String(password), 'utf8') : 0;
+                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, found: true, passwordMatch: false, candidateLen }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (e) {}
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
         // Prefer model method if present; fall back to signing directly
-        const token = user.generateAccessToken ? user.generateAccessToken() : jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+        const token = user.generateAccessToken ? user.generateAccessToken() : jwt.sign({ id: user._id, role: user.role }, getJwtSecret(), { expiresIn: '7d' });
 
         // Create a refresh token (rotatable) and store it on the user
         const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'dev_refresh_secret';
@@ -133,38 +173,30 @@ const loginUser = async (req, res) => {
             user.refreshTokens = user.refreshTokens || [];
             user.refreshTokens.push(refreshToken);
             await user.save();
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, event: 'persist_refresh_success', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (e) {}
         } catch (e) {
             console.warn('Failed to persist refresh token for user:', e && e.message ? e.message : e);
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, event: 'persist_refresh_failed', error: e && e.message ? e.message : String(e) }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (ee) {}
         }
 
-        // Set HttpOnly refresh token cookie (accessible only to server)
-        try {
-            const isProd = process.env.NODE_ENV === 'production';
-            const forceSecure = isProd || String(process.env.FORCE_SECURE_COOKIES || '').toLowerCase() === 'true';
-            // In local/dev environments we avoid SameSite=None without Secure because modern
-            // browsers will ignore such cookies. Use 'lax' for dev and 'none' (with secure)
-            // for production/cross-site scenarios.
-            const cookieOpts = { httpOnly: true, sameSite: forceSecure ? 'none' : 'lax', secure: !!forceSecure };
-            if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
-            // maxAge set to 7 days
-            res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
-        } catch (e) {
-            console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
-        }
-            try {
-                const cookieOpts = { httpOnly: true, sameSite: 'none' };
-                // For cross-site cookies, SameSite=None requires Secure attribute.
-                // Ensure Secure is set when SameSite is 'none'. In production this will
-                // also restrict cookies to HTTPS. If you need to test on localhost over
-                // HTTP, consider using a local HTTPS dev server or an env flag.
-                if (String(cookieOpts.sameSite).toLowerCase() === 'none') {
-                    cookieOpts.secure = true;
-                }
-                if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
-                res.cookie('refreshToken', refreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
-            } catch (e) {
-                console.warn('Failed to set refresh token cookie:', e && e.message ? e.message : e);
-            }
+        // For simpler dev and to avoid cross-site cookie issues, return both access
+        // and refresh tokens in the JSON response. Clients should store the
+        // refresh token securely (localStorage in dev) and send it in the body
+        // when calling /api/auth/refresh-token. This keeps existing endpoints
+        // but avoids relying on cookies which can be blocked in cross-origin dev.
+        
 
         // Don't send password in response
         const userResponse = {
@@ -181,8 +213,16 @@ const loginUser = async (req, res) => {
         res.status(200).json({
             message: 'Login Successful',
             token,
+            refreshToken,
             user: userResponse
         });
+        try {
+            const tmpDir = path.join(__dirname, '..', 'tmp');
+            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+            const logPath = path.join(tmpDir, 'auth_results.log');
+            const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, found: true, passwordMatch: true, success: true }) + '\n';
+            fs.appendFileSync(logPath, line);
+        } catch (e) {}
     } catch (error) {
         console.error('Login error:', error);
         res.status(500).json({ message: 'Error Logging in', error: error.message });
@@ -212,8 +252,8 @@ const authMiddleware = async (req, res, next) => {
 
 const logoutUser = async (req, res) => {
     try {
-        // Remove refresh token (if present) and clear cookie
-        const refreshToken = readCookie(req, 'refreshToken');
+        // Expect client to send refreshToken in body when logging out.
+        const { refreshToken } = req.body || {};
         if (refreshToken) {
             try {
                 const user = await User.findOne({ refreshTokens: refreshToken });
@@ -225,29 +265,17 @@ const logoutUser = async (req, res) => {
                 console.warn('Failed to remove refresh token on logout:', e && e.message ? e.message : e);
             }
         }
-        res.clearCookie('refreshToken');
-        res.clearCookie('token');
-            // Clear cookies with matching attributes to ensure proper removal in cross-site contexts
-            try {
-                res.clearCookie('refreshToken', { path: '/', sameSite: 'none', secure: true });
-            } catch (e) {
-                res.clearCookie('refreshToken');
-            }
-            try {
-                res.clearCookie('token', { path: '/', sameSite: 'none', secure: true });
-            } catch (e) {
-                res.clearCookie('token');
-            }
-        res.status(200).json({ message: 'Logout successful' });
+        return res.status(200).json({ message: 'Logout successful' });
     } catch (error) {
-        res.status(500).json({ message: 'Error logging out', error: error.message });
+        return res.status(500).json({ message: 'Error logging out', error: error.message });
     }
 };
 
 // Refresh access token using refresh token cookie
 const refreshAccessToken = async (req, res) => {
     try {
-        const refreshToken = readCookie(req, 'refreshToken');
+        // Expect refreshToken in request body: { refreshToken: '...' }
+        const refreshToken = (req.body && req.body.refreshToken) || null;
         if (!refreshToken) return res.status(401).json({ message: 'No refresh token' });
 
         const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'dev_refresh_secret';
@@ -255,6 +283,13 @@ const refreshAccessToken = async (req, res) => {
         try {
             decoded = jwt.verify(refreshToken, refreshSecret);
         } catch (err) {
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_refresh.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), event: 'verify_failed', error: err && err.message ? err.message : String(err) }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (e) {}
             return res.status(401).json({ message: 'Invalid refresh token', error: err.message });
         }
 
@@ -267,26 +302,23 @@ const refreshAccessToken = async (req, res) => {
         }
 
         // Issue new access token (and rotate refresh token)
-        const newAccessToken = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: process.env.ACCESS_EXPIRES_IN || '1h' });
+        const newAccessToken = jwt.sign({ id: user._id }, getJwtSecret(), { expiresIn: process.env.ACCESS_EXPIRES_IN || '1h' });
 
         // Rotate refresh token: remove old, add new
         const newRefreshToken = jwt.sign({ id: user._id }, refreshSecret, { expiresIn: process.env.REFRESH_EXPIRES_IN || '7d' });
         user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
         user.refreshTokens.push(newRefreshToken);
         await user.save();
+        try {
+            const tmpDir = path.join(__dirname, '..', 'tmp');
+            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+            const logPath = path.join(tmpDir, 'auth_results.log');
+            const line = JSON.stringify({ ts: new Date().toISOString(), event: 'rotate_refresh_success', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
+            fs.appendFileSync(logPath, line);
+        } catch (e) {}
 
-        // Set cookie
-                try {
-                    const isProd = process.env.NODE_ENV === 'production';
-                    const forceSecure = isProd || String(process.env.FORCE_SECURE_COOKIES || '').toLowerCase() === 'true';
-                    const cookieOpts = { httpOnly: true, sameSite: forceSecure ? 'none' : 'lax', secure: !!forceSecure };
-                    if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
-                    res.cookie('refreshToken', newRefreshToken, { ...cookieOpts, maxAge: 1000 * 60 * 60 * 24 * 7, path: '/' });
-                } catch (e) {
-                    console.warn('Failed to set new refresh token cookie:', e && e.message ? e.message : e);
-                }
-
-        return res.status(200).json({ success: true, token: newAccessToken, user: { _id: user._id, username: user.username, email: user.email, role: user.role } });
+        // Return rotated refresh token and new access token in JSON body
+        return res.status(200).json({ success: true, token: newAccessToken, refreshToken: newRefreshToken, user: { _id: user._id, username: user.username, email: user.email, role: user.role } });
     } catch (error) {
         console.error('Refresh token error:', error);
         return res.status(500).json({ message: 'Failed to refresh token', error: error.message });
@@ -418,3 +450,27 @@ module.exports = {
     getUserById,
     getAllUsers
 };
+
+// Dev-only debug endpoint: GET /api/auth/debug/refresh-tokens?identifier=<email|username>
+// Returns masked refresh tokens for the matched user. Enabled when NODE_ENV !== 'production' or
+// when ENABLE_DEBUG_ENDPOINTS=true.
+async function debugGetRefreshTokens(req, res) {
+    try {
+        const enabled = process.env.NODE_ENV !== 'production' || String(process.env.ENABLE_DEBUG_ENDPOINTS || '').toLowerCase() === 'true';
+        if (!enabled) return res.status(404).json({ message: 'Not found' });
+        const identifier = (req.query.identifier || '').trim();
+        if (!identifier) return res.status(400).json({ message: 'identifier query param required' });
+        const user = await User.findOne({ $or: [{ email: identifier }, { username: identifier }] });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        const masked = (user.refreshTokens || []).map(t => {
+            const s = String(t || '');
+            return s.length > 12 ? `${s.slice(0,6)}...${s.slice(-6)}` : s;
+        });
+        return res.status(200).json({ userId: user.id || user._id, email: user.email, masked });
+    } catch (err) {
+        return res.status(500).json({ message: 'Error', error: err && err.message });
+    }
+}
+
+// Attach debug handler to exports for route registration
+module.exports.debugGetRefreshTokens = debugGetRefreshTokens;

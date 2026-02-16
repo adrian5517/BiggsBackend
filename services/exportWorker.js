@@ -2,7 +2,10 @@ require('dotenv').config()
 const path = require('path')
 const fs = require('fs')
 const zlib = require('zlib')
-const mongoose = require('mongoose')
+let mongoose = null;
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+  try { mongoose = require('mongoose') } catch (e) { mongoose = null }
+}
 const ExportJob = require('../models/exportJobModel')
 const masterCtrl = require('../controllers/masterController')
 
@@ -12,6 +15,10 @@ if (!fs.existsSync(MASTER_OUT)) fs.mkdirSync(MASTER_OUT, { recursive: true })
 let polling = false
 
 async function connectIfNeeded() {
+  if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+    console.log('[exportWorker] ENABLE_MONGO!=true — skipping Mongo connection and worker activities')
+    return
+  }
   if (mongoose.connection.readyState === 1) return
   const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/biggs'
   console.log('[exportWorker] Resolved MONGO_URI =', uri)
@@ -53,12 +60,21 @@ async function pollLoop() {
   if (polling) return
   polling = true
   try {
+    if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') return
     await connectIfNeeded()
     // pick one pending job
-    const job = await ExportJob.findOneAndUpdate({ status: 'pending' }, { $set: { status: 'running' } }, { returnDocument: 'after' })
-    if (!job) return
-    // we set running above to claim it, but processJob will set again and save
-    await processJob(job)
+    let job = null
+    if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+      job = await ExportJob.findOneAndUpdate({ status: 'pending' }, { $set: { status: 'running' } }, { returnDocument: 'after' })
+      if (!job) return
+      await processJob(job)
+    } else {
+      // Postgres path: claim one pending job
+      const PgExportJob = require('../models/exportJobModel')
+      job = await PgExportJob.findPendingAndClaim()
+      if (!job) return
+      await processJob(job)
+    }
   } catch (e) {
     console.error('[exportWorker] poll error', e)
   } finally {

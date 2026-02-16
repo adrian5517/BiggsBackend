@@ -63,7 +63,21 @@ router.get('/reports', authMiddleware.protect, fetchController.getReports);
 router.get('/branches', authMiddleware.protect, fetchController.getBranches);
 
 // Manual fetch for a single date with branch list (client sends { date, branches, positions, files })
-router.post('/manual', authMiddleware.protect, fetchController.manualFetch);
+// Protect route and require admin role. Log and reject non-admin attempts.
+function requireAdmin(req, res, next) {
+	try {
+		const uid = req.user && req.user._id ? String(req.user._id) : 'unknown';
+		const role = req.user && req.user.role ? req.user.role : 'none';
+		if (role === 'admin') return next();
+		console.warn(`[fetch/manual] rejected non-admin attempt by user=${uid} role=${role} path=${req.originalUrl}`);
+		return res.status(403).json({ message: 'Forbidden: admin only' });
+	} catch (e) {
+		console.error('[fetch/manual] admin check error', e && e.message ? e.message : e);
+		return res.status(500).json({ message: 'Server error' });
+	}
+}
+
+router.post('/manual', authMiddleware.protect, requireAdmin, fetchController.manualFetch);
 
 // Start combiner job: scans a workdir (e.g., 'latest') and runs combine/enrichment
 router.post('/combine/start', authMiddleware.protect, fetchController.startCombine);

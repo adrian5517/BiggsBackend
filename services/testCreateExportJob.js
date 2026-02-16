@@ -13,7 +13,12 @@ function ensureEnvVar(key) {
   }
 }
 ensureEnvVar('MONGO_URI')
-const mongoose = require('mongoose')
+if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+  console.error('ENABLE_MONGO!=true — testCreateExportJob requires MongoDB. Set ENABLE_MONGO=true to run.');
+  process.exit(1);
+}
+let mongoose = null;
+try { mongoose = require('mongoose') } catch (e) { mongoose = null }
 const ExportJob = require('../models/exportJobModel')
 
 console.log('DEBUG: MONGO_URI=', process.env.MONGO_URI)

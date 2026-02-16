@@ -1,0 +1,12 @@
+{
+  "runAt": "2026-02-13T11:10:43.863Z",
+  "coll": "reports",
+  "field": "data",
+  "batch": 1000,
+  "limit": 0,
+  "cutoff": null,
+  "dryRun": true,
+  "processed": 747438,
+  "willTruncate": 0,
+  "estimatedBytes": 0
+}

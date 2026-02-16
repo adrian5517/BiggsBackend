@@ -1,4 +1,8 @@
 require('dotenv').config()
+if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+  console.log('ENABLE_MONGO!=true — importMasterToMongo requires MongoDB. Set ENABLE_MONGO=true to run this script.')
+  process.exit(0)
+}
 const fs = require('fs')
 const path = require('path')
 const zlib = require('zlib')
@@ -8,6 +12,8 @@ const MasterTransaction = require('../models/masterTransactionModel')
 const MASTER_DIR = path.join(__dirname, '..', 'master')
 const INDEX_PATH = path.join(MASTER_DIR, 'index.json')
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/biggs'
+
+async
 
 async function connect() {
   console.log('Resolved MONGO_URI =', MONGO_URI)

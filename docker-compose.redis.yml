@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  redis-staging:
+    image: redis:7.2
+    container_name: redis-staging
+    volumes:
+      - ./redis/redis-staging.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    command:
+      - "redis-server"
+      - "/usr/local/etc/redis/redis.conf"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis-data:

@@ -10,7 +10,8 @@ const {registerUser,
     refreshAccessToken,
     uploadProfilePicture,
     getUserById,
-    getAllUsers } = require('../controllers/authController');
+    getAllUsers,
+    debugGetRefreshTokens } = require('../controllers/authController');
 
 //Registration Routesss
 router.post('/register', registerUser);
@@ -20,6 +21,8 @@ router.post('/login',loginUser);
 router.post('/logout', logoutUser);
 //Refresh Token Route
 router.post('/refresh-token', refreshAccessToken);
+// Dev debug: list masked refresh tokens for identifier
+router.get('/debug/refresh-tokens', debugGetRefreshTokens);
 //Profile Picture Upload Route
 router.post('/profile-picture', authMiddleware.protect, upload.single('profilePicture'), uploadProfilePicture);
 //Get Users by ID Route

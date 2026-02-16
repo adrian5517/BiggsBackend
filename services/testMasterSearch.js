@@ -12,7 +12,12 @@ function ensureEnvVar(key) {
   }
 }
 ensureEnvVar('MONGO_URI')
-const mongoose = require('mongoose')
+if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+  console.error('ENABLE_MONGO!=true — testMasterSearch requires MongoDB. Set ENABLE_MONGO=true to run.');
+  process.exit(1);
+}
+let mongoose = null;
+try { mongoose = require('mongoose') } catch (e) { mongoose = null }
 const masterCtrl = require('../controllers/masterController')
 
 async function run() {

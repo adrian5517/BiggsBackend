@@ -3,7 +3,10 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 5000;
-const mongoose = require('mongoose');
+let mongoose = null;
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+  try { mongoose = require('mongoose'); } catch (e) { mongoose = null }
+}
 const MONGO_URI = process.env.MONGO_URI;
 const cron = require('node-cron');
 const authRoutes = require('./routes/authRoutes');
@@ -14,6 +17,8 @@ const masterRoutes = require('./routes/masterRoutes');
 const statusRoute = require('./routes/status');
 const healthRoute = require('./routes/health');
 const queueEventsRoute = require('./routes/queueEvents');
+const adminRoutes = require('./routes/adminRoutes');
+const { scheduleRetention } = require('./services/backupRetention');
 let exportQueueService = null
 try { exportQueueService = require('./services/exportQueue') } catch (e) { console.warn('exportQueue service not available', e.message) }
 let importQueueService = null
@@ -96,6 +101,36 @@ app.use('/api/master', masterRoutes);
 app.use('/api/status', statusRoute);
 app.use('/api/health', healthRoute);
 app.use('/api/queue/events', queueEventsRoute);
+app.use('/api/admin', adminRoutes);
+
+// Generic JSON error handler for API routes - ensures JSON responses on server errors
+app.use((err, req, res, next) => {
+  try {
+    console.error('Unhandled error:', err && err.stack ? err.stack : err);
+  } catch (e) {
+    // ignore logging errors
+  }
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  const path = req && (req.originalUrl || req.url || req.path) ? String(req.originalUrl || req.url || req.path) : '';
+  if (path.startsWith('/api/')) {
+    // Map MongoDB storage/quota errors to 507 Insufficient Storage with a helpful message
+    const isMongoQuotaError = err && (err.name === 'MongoServerError' || (err.message && String(err.message).toLowerCase().includes('over your space quota')));
+    if (isMongoQuotaError) {
+      console.error('MongoDB storage quota exceeded:', err && err.message ? err.message : err);
+      return res.status(507).json({ message: 'MongoDB storage quota exceeded. Free up space or upgrade your plan.' });
+    }
+
+    const status = err && err.status ? err.status : 500;
+    const message = err && err.message ? err.message : 'Server error';
+    return res.status(status).json({ message });
+  }
+
+  return next(err);
+});
 
 // Start the export worker in background (non-blocking)
 if (exportQueueService && exportQueueService.startWorker) {
@@ -119,13 +154,60 @@ if (importQueueService && importQueueService.startWorker) {
 
 console.log('Resolved MONGO_URI =', MONGO_URI || '<missing>')
 console.log(`Starting server on port ${port}...`)
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('Could not connect to MongoDB', err));
+// Connect to Mongo only when explicitly enabled. Default: Postgres-only mode (no Mongo connection).
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true' && MONGO_URI) {
+  mongoose.connect(MONGO_URI)
+    .then(() => console.log('Connected to MongoDB'))
+    .catch(err => console.error('Could not connect to MongoDB', err));
+} else {
+  console.log('MongoDB connection skipped (ENABLE_MONGO!=true). Running Postgres-only.')
+}
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+
+// Schedule backup retention if enabled and keep handle for graceful shutdown
+let _backupRetentionHandle = null;
+try {
+  const enable = process.env.POS_ENABLE_RETENTION !== 'false';
+  if (enable) {
+    const retentionDays = Number(process.env.POS_BACKUP_RETENTION_DAYS || 90);
+    const hours = Number(process.env.POS_BACKUP_RETENTION_INTERVAL_HOURS || 24);
+    const intervalMs = Math.max(1, hours) * 60 * 60 * 1000;
+    _backupRetentionHandle = scheduleRetention({ intervalMs, retentionDays });
+    console.log(`Scheduled backup retention: every ${hours}h, keep ${retentionDays} days`);
+  } else {
+    console.log('Backup retention scheduling disabled (POS_ENABLE_RETENTION=false)');
+  }
+} catch (e) {
+  console.error('Failed to schedule backup retention:', e && e.message ? e.message : e);
+}
+
+// Graceful shutdown: stop scheduled tasks and close DB connections
+async function gracefulShutdown(signal) {
+  console.log(`Received ${signal} - shutting down gracefully`);
+  try {
+    if (_backupRetentionHandle && typeof _backupRetentionHandle.stop === 'function') {
+      _backupRetentionHandle.stop();
+      console.log('Stopped backup retention scheduler');
+    }
+  } catch (e) {
+    console.error('Error stopping backup retention scheduler:', e && e.message ? e.message : e);
+  }
+
+  try {
+    await mongoose.disconnect();
+    console.log('Disconnected from MongoDB');
+  } catch (e) {
+    console.error('Error disconnecting MongoDB during shutdown:', e && e.message ? e.message : e);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 
 

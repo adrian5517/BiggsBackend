@@ -12,8 +12,15 @@ function ensureEnvVar(key) {
   }
 }
 ensureEnvVar('MONGO_URI')
+if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+  console.error('ENABLE_MONGO!=true — testExportMasterCsvGz requires MongoDB. Set ENABLE_MONGO=true to run.');
+  process.exit(1);
+}
 const zlib = require('zlib')
-const mongoose = require('mongoose')
+let mongoose = null;
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+  try { mongoose = require('mongoose') } catch (e) { mongoose = null }
+}
 const masterCtrl = require('../controllers/masterController')
 
 async function run() {

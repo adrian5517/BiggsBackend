@@ -1,7 +1,10 @@
 require('dotenv').config()
 const path = require('path')
 const { Queue, Worker } = require('bullmq')
-const mongoose = require('mongoose')
+let mongoose = null;
+if (String(process.env.ENABLE_MONGO).toLowerCase() === 'true') {
+  try { mongoose = require('mongoose') } catch (e) { mongoose = null }
+}
 const { processFolder } = require('./worker/processJob')
 
 const REDIS_URL = process.env.REDIS_URL || process.env.REDIS || null
@@ -26,6 +29,10 @@ async function enqueueImportJob(data = {}) {
 async function startWorker(opts = {}) {
   if (!REDIS_URL) {
     console.warn('[importQueue] REDIS_URL not set — import queue disabled')
+    return
+  }
+  if (String(process.env.ENABLE_MONGO).toLowerCase() !== 'true') {
+    console.warn('[importQueue] ENABLE_MONGO!=true — import queue worker disabled (requires MongoDB)')
     return
   }
   if (worker) return
