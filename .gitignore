@@ -2,14 +2,71 @@ node_modules/
 .env
 documents/
 scripts/
-<<<<<<< HEAD
-<<<<<<< HEAD
 latest/
 master/
 DESIGN.md
-=======
-latest/
->>>>>>> 6337fd4 (Working Fetched Data)
-=======
-latest/
->>>>>>> 6337fd4 (Working Fetched Data)
+
+# Local env files
+.env.local
+
+# Project-specific build / caches
+.next/
+out/
+dist/
+
+# Frontend build and deps
+BiggsFrontend/node_modules/
+BiggsFrontend/.next/
+BiggsFrontend/.env.local
+
+# Logs and temporary files
+tmp/
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Coverage and test output
+coverage/
+*.lcov
+
+# Misc caches
+.cache/
+node_modules/**/*.log
+
+# Sandbox / intern example folders (do not commit local training/sample dirs)
+fresh_for_intern/
+intern/
+example/
+examples/
+sample-data/
+data/
+datasets/
+
+# Exported/backup data
+exports/
+exports_old/
+backups/
+db_dumps/
+
+# Secrets and keys
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.crt
+*.env.*
