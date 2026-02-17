@@ -16,8 +16,8 @@ exports.protect = async (req, res, next) => {
                 console.log('[auth-debug] Extracted Token from header:', masked);
             }
 
-            // Verify token (use fallback secret in development)
-            const secret = process.env.JWT_SECRET || 'dev_jwt_secret';
+            // Verify token (use auth service)
+            const authService = require('../services/authService');
 
             // Detect common misconfiguration: JWT_SECRET accidentally set to a JWT string
             try {
@@ -44,7 +44,7 @@ exports.protect = async (req, res, next) => {
                     // ignore decode errors
                 }
             }
-            const decoded = jwt.verify(token, secret);
+            const decoded = authService.verifyAccessToken(token);
 
             if (!decoded || !decoded.id) {
                 return res.status(401).json({ message: 'Token is invalid or malformed' });
@@ -107,8 +107,8 @@ exports.protectWithQueryToken = async (req, res, next) => {
             return res.status(401).json({ message: 'Not authorized, token missing (expected Authorization header, ?token, JSON body.token, or cookie)' });
         }
 
-        const secret = process.env.JWT_SECRET || 'dev_jwt_secret';
-        const decoded = jwt.verify(token, secret);
+        const authService = require('../services/authService');
+        const decoded = authService.verifyAccessToken(token);
 
         if (!decoded || !decoded.id) {
             return res.status(401).json({ message: 'Token is invalid or malformed' });

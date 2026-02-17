@@ -2,6 +2,7 @@ const User = require('../models/usersModel');
 const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
+const authService = require('../services/authService');
 const streamifier = require('streamifier');
 const cloudinary = require('../cloudinary');
 
@@ -162,11 +163,10 @@ const loginUser = async (req, res) => {
         }
 
         // Prefer model method if present; fall back to signing directly
-        const token = user.generateAccessToken ? user.generateAccessToken() : jwt.sign({ id: user._id, role: user.role }, getJwtSecret(), { expiresIn: '7d' });
+        const token = user.generateAccessToken ? user.generateAccessToken() : authService.signAccessToken({ id: user._id, role: user.role }, '7d');
 
         // Create a refresh token (rotatable) and store it on the user
-        const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'dev_refresh_secret';
-        const refreshToken = jwt.sign({ id: user._id }, refreshSecret, { expiresIn: process.env.REFRESH_EXPIRES_IN || '7d' });
+        const refreshToken = authService.signRefreshToken({ id: user._id });
 
         // Persist refresh token to user document
         try {
@@ -277,11 +277,9 @@ const refreshAccessToken = async (req, res) => {
         // Expect refreshToken in request body: { refreshToken: '...' }
         const refreshToken = (req.body && req.body.refreshToken) || null;
         if (!refreshToken) return res.status(401).json({ message: 'No refresh token' });
-
-        const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'dev_refresh_secret';
         let decoded;
         try {
-            decoded = jwt.verify(refreshToken, refreshSecret);
+            decoded = authService.verifyRefreshToken(refreshToken);
         } catch (err) {
             try {
                 const tmpDir = path.join(__dirname, '..', 'tmp');
@@ -302,10 +300,10 @@ const refreshAccessToken = async (req, res) => {
         }
 
         // Issue new access token (and rotate refresh token)
-        const newAccessToken = jwt.sign({ id: user._id }, getJwtSecret(), { expiresIn: process.env.ACCESS_EXPIRES_IN || '1h' });
+        const newAccessToken = authService.signAccessToken({ id: user._id }, process.env.ACCESS_EXPIRES_IN || '1h');
 
         // Rotate refresh token: remove old, add new
-        const newRefreshToken = jwt.sign({ id: user._id }, refreshSecret, { expiresIn: process.env.REFRESH_EXPIRES_IN || '7d' });
+        const newRefreshToken = authService.signRefreshToken({ id: user._id });
         user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
         user.refreshTokens.push(newRefreshToken);
         await user.save();
