@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
 const authService = require('../services/authService');
+const crypto = require('crypto');
 const streamifier = require('streamifier');
 const cloudinary = require('../cloudinary');
 
@@ -168,16 +169,35 @@ const loginUser = async (req, res) => {
         // Create a refresh token (rotatable) and store it on the user
         const refreshToken = authService.signRefreshToken({ id: user._id });
 
-        // Persist refresh token to user document
+        // Persist refresh token to user document using DB-level helper when available.
         try {
-            user.refreshTokens = user.refreshTokens || [];
-            user.refreshTokens.push(refreshToken);
-            await user.save();
+            const useHashed = String(process.env.USE_HASHED_REFRESH_TOKENS || '').toLowerCase() === 'true';
+            if (useHashed) {
+                const hashed = crypto.createHash('sha256').update(String(refreshToken)).digest('hex');
+                const added = await User.addRefreshToken(user.id || user._id, hashed);
+                if (!added) {
+                    // fallback to original behavior if DB helper failed
+                    user.refreshTokens = user.refreshTokens || [];
+                    user.refreshTokens.push(hashed);
+                    await user.save();
+                } else {
+                    user.refreshTokens = added.refreshTokens;
+                }
+            } else {
+                const added = await User.addRefreshToken(user.id || user._id, refreshToken);
+                if (!added) {
+                    user.refreshTokens = user.refreshTokens || [];
+                    user.refreshTokens.push(refreshToken);
+                    await user.save();
+                } else {
+                    user.refreshTokens = added.refreshTokens;
+                }
+            }
             try {
                 const tmpDir = path.join(__dirname, '..', 'tmp');
                 if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
                 const logPath = path.join(tmpDir, 'auth_results.log');
-                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, event: 'persist_refresh_success', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
+                const line = JSON.stringify({ ts: new Date().toISOString(), identifier: loginKey, event: 'persist_refresh_success', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length, hashed: useHashed }) + '\n';
                 fs.appendFileSync(logPath, line);
             } catch (e) {}
         } catch (e) {
@@ -209,6 +229,20 @@ const loginUser = async (req, res) => {
             createdAt: user.createdAt,
             updatedAt: user.updatedAt
         };
+
+        // If cookie-based refresh is enabled, set an httpOnly cookie for the refresh token.
+        try {
+            const enableCookie = String(process.env.ENABLE_COOKIE_AUTH || '').toLowerCase() === 'true';
+            if (enableCookie && res && typeof res.cookie === 'function') {
+                const cookieVal = refreshToken;
+                res.cookie('refreshToken', cookieVal, {
+                    httpOnly: true,
+                    secure: process.env.NODE_ENV === 'production',
+                    sameSite: 'lax',
+                    maxAge: Number(process.env.REFRESH_COOKIE_MAX_AGE) || 30 * 24 * 60 * 60 * 1000 // 30 days
+                });
+            }
+        } catch (e) {}
 
         res.status(200).json({
             message: 'Login Successful',
@@ -256,15 +290,29 @@ const logoutUser = async (req, res) => {
         const { refreshToken } = req.body || {};
         if (refreshToken) {
             try {
-                const user = await User.findOne({ refreshTokens: refreshToken });
-                if (user) {
-                    user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
-                    await user.save();
+                const useHashed = String(process.env.USE_HASHED_REFRESH_TOKENS || '').toLowerCase() === 'true';
+                const candidate = useHashed ? crypto.createHash('sha256').update(String(refreshToken)).digest('hex') : refreshToken;
+                const removed = await User.removeRefreshToken(req.user && (req.user.id || req.user._id) || undefined, candidate);
+                if (!removed) {
+                    // fallback: try to find user by token and remove from memory
+                    try {
+                        const user = await User.findOne({ refreshTokens: refreshToken });
+                        if (user) {
+                            user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
+                            await user.save();
+                        }
+                    } catch (ee) {}
                 }
             } catch (e) {
                 console.warn('Failed to remove refresh token on logout:', e && e.message ? e.message : e);
             }
         }
+        try {
+            const enableCookie = String(process.env.ENABLE_COOKIE_AUTH || '').toLowerCase() === 'true';
+            if (enableCookie && res && typeof res.clearCookie === 'function') {
+                res.clearCookie('refreshToken', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
+            }
+        } catch (e) {}
         return res.status(200).json({ message: 'Logout successful' });
     } catch (error) {
         return res.status(500).json({ message: 'Error logging out', error: error.message });
@@ -294,29 +342,77 @@ const refreshAccessToken = async (req, res) => {
         const user = await User.findById(decoded.id);
         if (!user) return res.status(401).json({ message: 'User not found' });
 
-        // Check that this refresh token is still valid (in user's list)
-        if (!user.refreshTokens || !user.refreshTokens.includes(refreshToken)) {
-            return res.status(401).json({ message: 'Refresh token revoked' });
-        }
+        const useHashed = String(process.env.USE_HASHED_REFRESH_TOKENS || '').toLowerCase() === 'true';
 
         // Issue new access token (and rotate refresh token)
         const newAccessToken = authService.signAccessToken({ id: user._id }, process.env.ACCESS_EXPIRES_IN || '1h');
 
-        // Rotate refresh token: remove old, add new
         const newRefreshToken = authService.signRefreshToken({ id: user._id });
-        user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
-        user.refreshTokens.push(newRefreshToken);
-        await user.save();
-        try {
-            const tmpDir = path.join(__dirname, '..', 'tmp');
-            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-            const logPath = path.join(tmpDir, 'auth_results.log');
-            const line = JSON.stringify({ ts: new Date().toISOString(), event: 'rotate_refresh_success', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
-            fs.appendFileSync(logPath, line);
-        } catch (e) {}
 
-        // Return rotated refresh token and new access token in JSON body
-        return res.status(200).json({ success: true, token: newAccessToken, refreshToken: newRefreshToken, user: { _id: user._id, username: user.username, email: user.email, role: user.role } });
+        // Try DB-level atomic rotation first. For hashed mode, rotate using hashes.
+        try {
+            const candidate = useHashed ? crypto.createHash('sha256').update(String(refreshToken)).digest('hex') : refreshToken;
+            const replacement = useHashed ? crypto.createHash('sha256').update(String(newRefreshToken)).digest('hex') : newRefreshToken;
+            const rotated = await User.rotateRefreshToken(user.id || user._id, candidate, replacement);
+            if (!rotated) {
+                try {
+                    const tmpDir = path.join(__dirname, '..', 'tmp');
+                    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                    const logPath = path.join(tmpDir, 'auth_refresh.log');
+                    const line = JSON.stringify({ ts: new Date().toISOString(), event: 'revoked_or_missing', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length, maskedCandidate: String(refreshToken).slice(0,6) + '...' + String(refreshToken).slice(-6), hashed: useHashed }) + '\n';
+                    fs.appendFileSync(logPath, line);
+                } catch (e) {}
+                return res.status(401).json({ message: 'Refresh token revoked or missing' });
+            }
+            // rotated contains updated user with refreshed token list
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), event: 'rotate_refresh_success', userId: rotated.id || rotated._id, refreshTokensCount: (rotated.refreshTokens||[]).length, hashed: useHashed }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (e) {}
+            // If cookie-based refresh is enabled, set new refresh token as httpOnly cookie
+            try {
+                const enableCookie = String(process.env.ENABLE_COOKIE_AUTH || '').toLowerCase() === 'true';
+                if (enableCookie && res && typeof res.cookie === 'function') {
+                    res.cookie('refreshToken', newRefreshToken, {
+                        httpOnly: true,
+                        secure: process.env.NODE_ENV === 'production',
+                        sameSite: 'lax',
+                        maxAge: Number(process.env.REFRESH_COOKIE_MAX_AGE) || 30 * 24 * 60 * 60 * 1000
+                    });
+                }
+            } catch (e) {}
+
+            return res.status(200).json({ success: true, token: newAccessToken, refreshToken: newRefreshToken, user: { _id: rotated._id, username: rotated.username, email: rotated.email, role: rotated.role } });
+        } catch (e) {
+            // If DB rotation failed unexpectedly, fall back to in-memory rotation
+            try {
+                user.refreshTokens = (user.refreshTokens || []).filter(t => t !== refreshToken);
+                user.refreshTokens.push(newRefreshToken);
+                await user.save();
+            } catch (ee) {}
+            try {
+                const tmpDir = path.join(__dirname, '..', 'tmp');
+                if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+                const logPath = path.join(tmpDir, 'auth_results.log');
+                const line = JSON.stringify({ ts: new Date().toISOString(), event: 'rotate_refresh_fallback', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
+                fs.appendFileSync(logPath, line);
+            } catch (eee) {}
+            try {
+                const enableCookie = String(process.env.ENABLE_COOKIE_AUTH || '').toLowerCase() === 'true';
+                if (enableCookie && res && typeof res.cookie === 'function') {
+                    res.cookie('refreshToken', newRefreshToken, {
+                        httpOnly: true,
+                        secure: process.env.NODE_ENV === 'production',
+                        sameSite: 'lax',
+                        maxAge: Number(process.env.REFRESH_COOKIE_MAX_AGE) || 30 * 24 * 60 * 60 * 1000
+                    });
+                }
+            } catch (e) {}
+            return res.status(200).json({ success: true, token: newAccessToken, refreshToken: newRefreshToken, user: { _id: user._id, username: user.username, email: user.email, role: user.role } });
+        }
     } catch (error) {
         console.error('Refresh token error:', error);
         return res.status(500).json({ message: 'Failed to refresh token', error: error.message });

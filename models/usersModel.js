@@ -140,6 +140,71 @@ class User {
     const res = await query('SELECT * FROM users');
     return res.rows.map((r) => new User(r, false));
   }
+
+  /**
+   * Atomically rotate a refresh token in Postgres for a specific user.
+   * Returns the updated User instance on success, or null if candidate
+   * token was not present for that user.
+   */
+  static async rotateRefreshToken(userId, candidate, newToken) {
+    try {
+      const sql = `UPDATE users
+                   SET refresh_tokens = (
+                     SELECT array_agg(CASE WHEN t = $2 THEN $3 ELSE t END)
+                     FROM unnest(refresh_tokens) t
+                   ), updated_at = now()
+                   WHERE id = $1 AND $2 = ANY(refresh_tokens)
+                   RETURNING *`;
+      const res = await query(sql, [Number(userId), candidate, newToken]);
+      if (!res.rows.length) return null;
+      const user = new User(res.rows[0], false);
+      // debug log
+      try {
+        const tmpDir = require('path').join(__dirname, '..', 'tmp');
+        if (!require('fs').existsSync(tmpDir)) require('fs').mkdirSync(tmpDir, { recursive: true });
+        const logPath = require('path').join(tmpDir, 'users_save.log');
+        const line = JSON.stringify({ ts: new Date().toISOString(), action: 'rotate', userId: user.id || user._id, refreshTokensCount: (user.refreshTokens||[]).length }) + '\n';
+        require('fs').appendFileSync(logPath, line);
+      } catch (e) {}
+      return user;
+    } catch (e) {
+      // If the DB isn't available or the query fails, return null to allow
+      // callers to fallback to other strategies. Do not throw to avoid
+      // breaking refresh flows during troubleshooting.
+      return null;
+    }
+  }
+
+  /** Add a refresh token if it's not already present (returns updated user or null). */
+  static async addRefreshToken(userId, token) {
+    try {
+      const sql = `UPDATE users
+                   SET refresh_tokens = CASE WHEN $2 = ANY(refresh_tokens) THEN refresh_tokens ELSE array_append(refresh_tokens, $2) END,
+                       updated_at = now()
+                   WHERE id = $1
+                   RETURNING *`;
+      const res = await query(sql, [Number(userId), token]);
+      if (!res.rows.length) return null;
+      return new User(res.rows[0], false);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Remove a refresh token for the given user (returns updated user or null). */
+  static async removeRefreshToken(userId, token) {
+    try {
+      const sql = `UPDATE users
+                   SET refresh_tokens = array_remove(refresh_tokens, $2), updated_at = now()
+                   WHERE id = $1
+                   RETURNING *`;
+      const res = await query(sql, [Number(userId), token]);
+      if (!res.rows.length) return null;
+      return new User(res.rows[0], false);
+    } catch (e) {
+      return null;
+    }
+  }
 }
 
 function createUser(doc) { return new User(doc, true); }
